@@ -9,7 +9,11 @@ PR #36 is a release-engineering gate only. It does not authorize tagging or publ
 - [ ] Built wheel installs in clean Linux and Windows environments.
 - [ ] Core wheel install does not pull the MCP SDK.
 - [ ] `contextmesh --help` runs from the installed wheel.
-- [ ] `contextmesh[mcp]` installs independently on Linux and Windows.
+- [ ] `contextmesh-graph[mcp]` installs independently on Linux and Windows.
+- [x] Distribution name `contextmesh-graph` checked against the real PyPI index (not
+      assumed from the import name): `contextmesh` is already an unrelated published
+      package, so the distribution is named `contextmesh-graph` while the import
+      namespace and console scripts stay `contextmesh` / `contextmesh-mcp`.
 - [ ] `contextmesh-mcp --help` and launcher imports run from the installed wheel.
 - [ ] Installed MCP launcher can create and restore a persistent session across fresh processes.
 - [x] Package/repository metadata points to `Deep-Sixed/Context-Mesh`.

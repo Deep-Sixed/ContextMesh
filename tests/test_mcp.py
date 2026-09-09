@@ -476,7 +476,7 @@ class ServerTest(unittest.TestCase):
         try:
             import mcp  # noqa: F401
         except ImportError:
-            self.skipTest("mcp SDK not installed (pip install 'contextmesh[mcp]')")
+            self.skipTest("mcp SDK not installed (pip install 'contextmesh-graph[mcp]')")
 
     @staticmethod
     def _registry_entry(name):
