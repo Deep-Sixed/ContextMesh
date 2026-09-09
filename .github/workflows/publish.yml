@@ -44,13 +44,15 @@ jobs:
           python -m twine check dist/*
           python - <<'PY'
           from pathlib import Path
+          import tomllib
 
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
           wheels = list(Path("dist").glob("*.whl"))
           sdists = list(Path("dist").glob("*.tar.gz"))
           assert len(wheels) == 1, wheels
           assert len(sdists) == 1, sdists
-          assert wheels[0].name.startswith("contextmesh_graph-0.1.1-"), wheels[0]
-          assert sdists[0].name == "contextmesh_graph-0.1.1.tar.gz", sdists[0]
+          assert wheels[0].name.startswith(f"contextmesh_graph-{version}-"), wheels[0]
+          assert sdists[0].name == f"contextmesh_graph-{version}.tar.gz", sdists[0]
           print(wheels[0])
           print(sdists[0])
           PY
