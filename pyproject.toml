@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "contextmesh"
+name = "contextmesh-graph"
 version = "0.1.0"
 description = "A typed context graph for AI agents: provenance, assumptions, and answers that walk a path you can read."
 readme = "README.md"

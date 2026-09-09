@@ -846,7 +846,7 @@ the *only* one.
 ## MCP — controlled writes, narrow authority
 
 ```bash
-pip install 'contextmesh[mcp]'
+pip install 'contextmesh-graph[mcp]'
 contextmesh-mcp --demo               # a graph rebuilt for this process
 contextmesh-mcp --session ./session  # a graph that outlives it
 ```

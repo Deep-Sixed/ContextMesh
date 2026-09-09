@@ -1,6 +1,6 @@
 """Context Mesh MCP server — stdio transport.
 
-    pip install 'contextmesh[mcp]'
+    pip install 'contextmesh-graph[mcp]'
     contextmesh-mcp --demo --rounds 8 --save ./session   # write one
     contextmesh-mcp --session ./session                  # serve it
 
@@ -31,7 +31,7 @@ try:
 except ImportError as exc:  # pragma: no cover - depends on the optional extra
     raise SystemExit(
         "the MCP SDK is not installed. Install the extra:\n"
-        "    pip install 'contextmesh[mcp]'\n"
+        "    pip install 'contextmesh-graph[mcp]'\n"
         "It needs Python 3.10 or newer; contextmesh itself supports 3.9.\n"
         f"(import failed: {exc})"
     ) from exc
