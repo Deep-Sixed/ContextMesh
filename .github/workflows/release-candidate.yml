@@ -88,7 +88,7 @@ jobs:
           from pathlib import Path
           import subprocess, sys
           wheel = next(Path("dist").glob("*.whl")).resolve()
-          spec = f"contextmesh[mcp] @ {wheel.as_uri()}"
+          spec = f"contextmesh-graph[mcp] @ {wheel.as_uri()}"
           subprocess.check_call([sys.executable, "-m", "pip", "install", spec])
           PY
       - name: Exercise installed MCP entry point
