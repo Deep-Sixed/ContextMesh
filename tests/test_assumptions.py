@@ -340,5 +340,96 @@ class Rule7AtomicCommitTest(unittest.TestCase):
         self.assertEqual(len(self.graph.edges), initial_edges)
 
 
+class ReplacementMustBeNewGroundTest(unittest.TestCase):
+    """reject(replacement=...) used to route through assume(), whose
+    same-statement no-op handed back an existing record for reject() to
+    rewrite in place -- or, for the rejected statement itself, raised a
+    self-edge error after the rejection had already been committed."""
+
+    def setUp(self):
+        self.graph = ContextGraph()
+        self.graph.build = 1
+        self.ledger = AssumptionLedger(self.graph)
+        self.source = self.graph.add_node(
+            NodeType.SOURCE,
+            "Postmortem",
+            attrs={"origin": "review", "retrieved_at": "2026-07-01"},
+        )
+
+    def witness(self, text):
+        return self.graph.add_node(
+            NodeType.EVIDENCE,
+            text,
+            attrs={"kind": "postmortem"},
+            provenance=Provenance(source_id=self.source.id, recorded_at_build=1),
+        ).id
+
+    def snapshot(self, assumption_id):
+        record = self.graph.assumptions[assumption_id]
+        node = self.graph.node(assumption_id)
+        return (
+            record.status,
+            record.version,
+            record.supersedes,
+            record.superseded_by,
+            node.invalidated,
+            len(self.graph.edges),
+        )
+
+    def test_replacing_with_the_rejected_statement_is_refused_before_any_write(self):
+        a = self.ledger.assume("A holds")
+        before = self.snapshot(a.id)
+        with self.assertRaisesRegex(AssumptionError, "not new ground"):
+            self.ledger.reject(a.id, evidence_id=self.witness("A broke"), replacement="A holds")
+        self.assertEqual(self.snapshot(a.id), before)
+        self.assertIs(self.graph.assumptions[a.id].status, AssumptionStatus.ACTIVE)
+
+    def test_replacing_with_an_existing_rejected_statement_leaves_it_untouched(self):
+        a = self.ledger.assume("A holds")
+        b = self.ledger.assume("B holds")
+        self.ledger.reject(b.id, evidence_id=self.witness("B broke"))
+        b_before, a_before = self.snapshot(b.id), self.snapshot(a.id)
+        with self.assertRaisesRegex(AssumptionError, r"not new ground.*rejected"):
+            self.ledger.reject(a.id, evidence_id=self.witness("A broke"), replacement="B holds")
+        self.assertEqual(self.snapshot(b.id), b_before)
+        self.assertEqual(self.snapshot(a.id), a_before)
+
+    def test_a_new_replacement_still_supersedes(self):
+        a = self.ledger.assume("A holds")
+        report = self.ledger.reject(
+            a.id, evidence_id=self.witness("A broke"), replacement="C holds"
+        )
+        new = self.graph.assumptions[report.replacement_id]
+        self.assertEqual((new.statement, new.version, new.supersedes), ("C holds", 2, a.id))
+
+
+class ReassumeDoesNotDropEvidenceTest(unittest.TestCase):
+    def setUp(self):
+        self.graph = ContextGraph()
+        self.ledger = AssumptionLedger(self.graph)
+        source = self.graph.add_node(
+            NodeType.SOURCE, "Bench", attrs={"origin": "bench", "retrieved_at": "2026-07-01"}
+        )
+        self.ev = self.graph.add_node(
+            NodeType.EVIDENCE,
+            "linear growth observed",
+            attrs={"kind": "bench"},
+            provenance=Provenance(source_id=source.id),
+        ).id
+
+    def test_new_evidence_on_an_existing_statement_is_refused_not_dropped(self):
+        a = self.ledger.assume("X holds")
+        edges = len(self.graph.edges)
+        with self.assertRaisesRegex(AssumptionError, "does not add justification"):
+            self.ledger.assume("X holds", evidence_ids=[self.ev])
+        self.assertEqual(self.graph.assumptions[a.id].evidence_ids, [])
+        self.assertEqual(len(self.graph.edges), edges)
+
+    def test_repeating_the_same_evidence_is_still_a_no_op(self):
+        a = self.ledger.assume("X holds", evidence_ids=[self.ev])
+        self.assertIs(self.ledger.assume("X holds", evidence_ids=[self.ev]), a)
+        self.assertIs(self.ledger.assume("X holds"), a)
+
+
 if __name__ == "__main__":
     unittest.main()
