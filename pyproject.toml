@@ -33,7 +33,7 @@ contextmesh-mcp = "contextmesh_mcp.server:main"
 packages = ["contextmesh", "contextmesh_mcp"]
 
 [tool.setuptools.package-data]
-contextmesh = ["../GRAPH.md"]
+contextmesh = ["GRAPH.md"]
 
 [tool.ruff]
 target-version = "py39"

@@ -287,5 +287,25 @@ class TypecheckTest(unittest.TestCase):
         self.assertTrue(ContextGraph())
 
 
+class SchemaShipsInsideThePackageTest(unittest.TestCase):
+    """0.1.1 installed the schema as a loose top-level site-packages/GRAPH.md
+    (package-data "../GRAPH.md"), where another distribution shipping or
+    removing a file of that name would break `import contextmesh`."""
+
+    def test_the_schema_is_read_from_inside_the_package(self):
+        import contextmesh
+
+        package = Path(contextmesh.__file__).resolve().parent
+        self.assertEqual(Path(ONTOLOGY_FILE).parent, package)
+        self.assertTrue(Path(ONTOLOGY_FILE).is_file())
+
+    def test_package_data_does_not_reach_outside_the_package(self):
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        text = pyproject.read_text(encoding="utf-8")
+        section = text.split("[tool.setuptools.package-data]", 1)[1].split("\n[", 1)[0]
+        self.assertNotIn("..", section)
+        self.assertIn('"GRAPH.md"', section)
+
+
 if __name__ == "__main__":
     unittest.main()
