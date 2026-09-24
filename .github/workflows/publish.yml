@@ -7,14 +7,25 @@ on:
 permissions:
   contents: read
 
+# Every action is pinned to a full commit SHA, with the release it came from
+# in the comment. A tag or branch ref can be moved by whoever controls the
+# upstream repository; in the publish job that would run their code with an
+# OIDC token PyPI accepts for contextmesh-graph.
+#
+# The artifact is built once. The files the verify job installs and exercises
+# are the same files the publish job uploads: nothing is rebuilt after it has
+# been tested.
+
 jobs:
   build:
     name: Build release distributions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -36,10 +47,21 @@ jobs:
           print(f"release identity: {project['name']} {project['version']} from {actual_tag}")
           PY
 
+      - name: Verify the tagged commit is on main
+        # A release can be cut from a tag on any commit. Only main has been
+        # through review and the required checks.
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME ($GITHUB_SHA) is on main"
+
       - name: Build and check wheel and sdist
         run: |
           python -m pip install --upgrade pip
-          python -m pip install build twine
+          python -m pip install build==1.6.1 twine==7.0.0
           python -m build
           python -m twine check dist/*
           python - <<'PY'
@@ -58,15 +80,130 @@ jobs:
           PY
 
       - name: Upload release distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pypi-dist
           path: dist/
           if-no-files-found: error
 
+  test:
+    name: Test suite at the tagged commit
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Run the full suite
+        run: python -m unittest discover -s tests
+
+  verify:
+    name: Exercise the built distributions (${{ matrix.os }})
+    needs: build
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # No checkout: everything below imports the installed distribution, so a
+    # packaging mistake cannot be hidden by the source tree on sys.path.
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Retrieve release distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pypi-dist
+          path: dist
+
+      - name: Install the wheel, core only
+        shell: bash
+        run: |
+          python -m venv core
+          if [ -x core/bin/python ]; then echo "PY_CORE=$PWD/core/bin/python" >> "$GITHUB_ENV"; else echo "PY_CORE=$PWD/core/Scripts/python.exe" >> "$GITHUB_ENV"; fi
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess, sys
+          wheel = next(Path("dist").glob("*.whl"))
+          py = str(next(p for p in (Path("core/bin/python"), Path("core/Scripts/python.exe")) if p.exists()))
+          subprocess.check_call([py, "-m", "pip", "install", str(wheel)])
+          PY
+
+      - name: The installed package is the release, laid out as a package
+        shell: bash
+        run: |
+          "$PY_CORE" - <<'PY'
+          import importlib.util, os, sysconfig
+          from pathlib import Path
+          import contextmesh, contextmesh_mcp
+          from contextmesh.ontology import ONTOLOGY_FILE
+
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          assert contextmesh.__version__ == version, (contextmesh.__version__, version)
+          assert contextmesh_mcp.__version__ == version, (contextmesh_mcp.__version__, version)
+
+          package = Path(contextmesh.__file__).resolve().parent
+          assert Path(ONTOLOGY_FILE).resolve().parent == package, ONTOLOGY_FILE
+          assert Path(ONTOLOGY_FILE).is_file(), ONTOLOGY_FILE
+          loose = Path(sysconfig.get_paths()["purelib"]) / "GRAPH.md"
+          assert not loose.exists(), f"schema installed loose at {loose}"
+
+          assert importlib.util.find_spec("mcp") is None, "core install pulled in the MCP SDK"
+          print(f"contextmesh {version}: schema at {ONTOLOGY_FILE}")
+          PY
+
+      - name: Exercise the installed CLI and a session across processes
+        shell: bash
+        run: |
+          BIN="$(dirname "$PY_CORE")"
+          "$BIN/contextmesh" --help > /dev/null
+          "$PY_CORE" -c "from contextmesh_mcp.session import Session; Session.build(rounds=1).save('restart-session')"
+          "$PY_CORE" -c "from contextmesh_mcp.session import Session; s=Session.load('restart-session'); assert s.generation == 1 and s.describe()['persistent']; print('restart ok')"
+
+      - name: Install the wheel with the MCP extra and exercise the launcher
+        shell: bash
+        run: |
+          python -m venv withmcp
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          wheel = next(Path("dist").glob("*.whl")).resolve()
+          py = str(next(p for p in (Path("withmcp/bin/python"), Path("withmcp/Scripts/python.exe")) if p.exists()))
+          subprocess.check_call([py, "-m", "pip", "install", f"contextmesh-graph[mcp] @ {wheel.as_uri()}"])
+          PY
+          if [ -d withmcp/bin ]; then BIN=withmcp/bin; else BIN=withmcp/Scripts; fi
+          "$BIN/contextmesh-mcp" --help > /dev/null
+          "$BIN/contextmesh-mcp" --demo --rounds 1 --save mcp-session > /dev/null
+          "$BIN/contextmesh-mcp" --session mcp-session --save restored-session > /dev/null
+          echo "mcp extra ok"
+
+      - name: The sdist builds and installs the same package
+        shell: bash
+        run: |
+          python -m venv fromsdist
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          sdist = next(Path("dist").glob("*.tar.gz"))
+          py = str(next(p for p in (Path("fromsdist/bin/python"), Path("fromsdist/Scripts/python.exe")) if p.exists()))
+          subprocess.check_call([py, "-m", "pip", "install", str(sdist)])
+          code = (
+              "import os, contextmesh; from pathlib import Path; "
+              "from contextmesh.ontology import ONTOLOGY_FILE; "
+              "assert contextmesh.__version__ == os.environ['GITHUB_REF_NAME'].removeprefix('v'); "
+              "assert Path(ONTOLOGY_FILE).resolve().parent == Path(contextmesh.__file__).resolve().parent; "
+              "print('sdist ok')"
+          )
+          subprocess.check_call([py, "-c", code])
+          PY
+
   publish:
     name: Publish release to PyPI
-    needs: build
+    needs: [build, test, verify]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -76,10 +213,10 @@ jobs:
       id-token: write
     steps:
       - name: Retrieve release distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: pypi-dist
           path: dist/
 
       - name: Publish release distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
