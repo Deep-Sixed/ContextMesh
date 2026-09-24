@@ -96,19 +96,32 @@ class AuditorFailureTest(unittest.TestCase):
 
         self.assertEqual(reports, [])
         self.assertEqual(audited, ["first", "second"])
-        self.assertIs(runner.state("first"), TaskState.FAILED)
+        # Work that already passed its audit is not failed by an auditor
+        # that cannot answer now: nothing would ever re-run it.
+        self.assertIs(runner.state("first"), TaskState.DONE)
         self.assertIs(runner.state("second"), TaskState.DONE)
         assumption = runner.graph.assumptions[runner["first"].assumption_id]
         self.assertIs(assumption.status, AssumptionStatus.ACTIVE)
-        failures = [
+        errors = [
             entry
             for entry in runner.ledger.of("first")
-            if entry.event is Event.FAILED
+            if entry.event is Event.AUDIT_ERROR
         ]
         self.assertIn(
             "auditor error: ConnectionError: audit backend down",
-            failures[-1].detail,
+            errors[-1].detail,
         )
+        self.assertFalse(
+            [e for e in runner.ledger.of("first") if e.event is Event.FAILED]
+        )
+
+        # The outage clears; the next recheck simply asks again.
+        fail_now["value"] = False
+        audited.clear()
+        self.assertEqual(runner.recheck(), [])
+        self.assertEqual(audited, ["first", "second"])
+        self.assertIs(runner.state("first"), TaskState.DONE)
+        self.assertIs(runner.ledger.of("first")[-1].event, Event.AUDITED)
 
     def test_invalid_auditor_return_is_still_a_contract_error(self):
         runner = Runner("bad verdict")

@@ -184,13 +184,21 @@ def recheck(
                     graph=runner.graph,
                 )
             )
+        except EvidenceRecheckError:
+            # Raised by ctx.disproved() itself: the auditor broke the evidence
+            # contract. That is the same violation as a disproof returned
+            # without evidence, which is fatal below, so it is fatal here too
+            # and the staged MCP transaction is discarded rather than
+            # committing it as an ordinary auditor outage.
+            raise
         except Exception as exc:
-            # Match Runner.recheck(): an unavailable auditor is a task failure,
-            # never a disproof, and must not prevent independent rechecks.
-            task.state = TaskState.FAILED
+            # Match Runner.recheck(): an unavailable auditor is never a
+            # disproof, must not prevent independent rechecks, and does not
+            # fail work that already passed its audit. Record it; the task
+            # stays DONE and the next recheck asks again.
             runner.ledger.record(
                 runner.round,
-                Event.FAILED,
+                Event.AUDIT_ERROR,
                 task.name,
                 f"auditor error: {type(exc).__name__}: {exc}",
                 node_id=task.node_id,
