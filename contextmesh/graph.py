@@ -78,6 +78,27 @@ def _no_constants(value: str) -> float:
     )
 
 
+#: Edge kinds out of a decision that ``decide()`` itself writes and that its
+#: fingerprint covers. ``depends_on`` counts only into an assumption: a
+#: decision->decision dependency is a task ordering the Runner wires after
+#: ``decide()`` returns, not part of the decision (see ``_decision_structure``).
+_DIGESTED_EDGES = (
+    EdgeType.CITES,
+    EdgeType.DERIVED_FROM,
+    EdgeType.PRODUCES,
+    EdgeType.SUPERSEDES,
+)
+
+
+def _digest_covers(src: Node, type: EdgeType, dst: Node) -> bool:
+    """Would this edge change an explicit-id decision's fingerprinted content?"""
+    if src.type is not NodeType.DECISION or src.attrs.get("decision_identity") != "explicit":
+        return False
+    if type is EdgeType.DEPENDS_ON:
+        return dst.type is NodeType.ASSUMPTION
+    return type in _DIGESTED_EDGES
+
+
 class ContextGraph:
     """A typed context graph.
 
@@ -264,8 +285,20 @@ class ContextGraph:
         *,
         evidence_ids: Optional[Iterable[str]] = None,
         weight: float = 1.0,
+        _decision_edge_authorized: bool = False,
     ) -> Edge:
         """Add a typed edge. Raises OntologyError if the pair is not legal.
+
+        An explicit-id decision's own edges -- the ones its
+        ``decision_payload_digest`` covers -- are written by
+        ``DecisionLog.decide()`` and by snapshot restoration, and by nothing
+        else. A later edge of one of those kinds would change the content the
+        digest vouches for, so the next load would refuse a correct snapshot
+        as tampered and an identical retry of the original ``decide()`` would
+        be refused as different content. It is refused here instead, where
+        the caller can see it: pass it to ``decide()``. Adding an edge the
+        decision already has is still an idempotent repeat.
+        ``_decision_edge_authorized`` is not part of the public contract.
 
         This is not a binding path: it never takes an ``assumption_id``. A
         live edge is bound through :meth:`AssumptionLedger.justifies`, which
@@ -303,6 +336,15 @@ class ContextGraph:
                     e for e in evidence_ids if e not in edge.evidence_ids
                 )
             return edge
+        if not _decision_edge_authorized and _digest_covers(
+            self.nodes[src], type, self.nodes[dst]
+        ):
+            raise OntologyError(
+                f"decision {src!r} was recorded with an explicit id, so its "
+                f"{type.value} edges are part of the content its digest vouches "
+                f"for; refusing to add {src!r}-[{type.value}]->{dst!r} after the "
+                "fact -- pass it to DecisionLog.decide() instead"
+            )
         edge_id = slug(f"{src}|{type.value}|{dst}", "edge")
         if edge_id in self.edges:
             collision = self.edges[edge_id]
@@ -606,6 +648,8 @@ class ContextGraph:
                 stored.dst,
                 evidence_ids=stored.evidence_ids,
                 weight=stored.weight,
+                # Restoring is not adding: the digest check below judges these.
+                _decision_edge_authorized=True,
             )
             # Edge identity is derived from (src, type, dst), so a snapshot id
             # that disagrees with the recomputed one means the file was edited

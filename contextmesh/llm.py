@@ -63,6 +63,16 @@ class LLMProviderError(LLMError):
         self.status = status
 
 
+class LLMResponseTooLargeError(LLMProviderError):
+    """A successful provider response exceeded ``max_response_bytes``.
+
+    Deliberately not an :class:`LLMTransportError`: an HTTP response *was*
+    obtained, and the same request will draw the same oversized reply, so
+    retrying it only re-bills the completion. It fails closed on the first
+    attempt, with the status and the limit in the message.
+    """
+
+
 class LLMResponseError(LLMError):
     """A provider response cannot be interpreted as requested output."""
 
@@ -284,7 +294,7 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _bounded_read(readable: Any, max_bytes: int) -> bytes:
+def _bounded_read(readable: Any, max_bytes: int) -> Optional[bytes]:
     """Read at most ``max_bytes`` and refuse whatever comes after.
 
     ``.read()`` with no argument buffers the whole body regardless of how
@@ -296,9 +306,9 @@ def _bounded_read(readable: Any, max_bytes: int) -> bytes:
     """
     data = readable.read(max_bytes + 1)
     if len(data) > max_bytes:
-        raise LLMTransportError(
-            f"provider response exceeded the {max_bytes}-byte limit; refusing to buffer it"
-        )
+        # What an oversized body means depends on the status, so the caller
+        # decides; this only guarantees nothing past limit + 1 is buffered.
+        return None
     return data
 
 
@@ -317,13 +327,26 @@ class UrllibTransport:
         )
         try:
             with self._opener.open(raw, timeout=request.timeout) as response:
+                status = int(response.status)
+                body = _bounded_read(response, request.max_response_bytes)
+                if body is None:
+                    raise LLMResponseTooLargeError(
+                        f"provider response (HTTP {status}) exceeded the "
+                        f"{request.max_response_bytes}-byte limit; refusing to buffer it",
+                        status=status,
+                    )
                 return HTTPResponse(
-                    status=int(response.status),
+                    status=status,
                     headers={str(k): str(v) for k, v in response.headers.items()},
-                    body=_bounded_read(response, request.max_response_bytes),
+                    body=body,
                 )
         except urllib.error.HTTPError as exc:
-            body = _bounded_read(exc, request.max_response_bytes)
+            # Nothing reads an error body -- the client acts on the status
+            # alone -- so an oversized one is dropped after the bounded read
+            # and the status still decides: a 4xx fails closed at once, a
+            # 429/5xx is retried. Raising here turned every oversized error
+            # page into a retried "transport" failure that hid the status.
+            body = _bounded_read(exc, request.max_response_bytes) or b""
             headers = {str(k): str(v) for k, v in exc.headers.items()} if exc.headers else {}
             return HTTPResponse(status=int(exc.code), headers=headers, body=body)
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -1173,6 +1196,7 @@ __all__ = [
     "LLMProviderError",
     "LLMProvenance",
     "LLMRequestTooLargeError",
+    "LLMResponseTooLargeError",
     "LLMResponseError",
     "LLMResult",
     "LLMSchemaError",

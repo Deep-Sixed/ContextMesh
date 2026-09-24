@@ -112,6 +112,10 @@ class Event(str, Enum):
     CACHED = "cached"
     BLOCKED = "blocked"
     FAILED = "failed"
+    #: A recheck auditor raised instead of returning a verdict. Recorded
+    #: without changing the task: the work was verified when it ran, and an
+    #: auditor that could not answer now proves nothing either way.
+    AUDIT_ERROR = "audit_error"
 
 
 # ── verdicts ─────────────────────────────────────────────────────────────
@@ -1651,12 +1655,14 @@ class Runner:
                 verdict = self._audit(task, task.output, assumption)
             except _AuditorRaised as exc:
                 # One broken auditor must not abort independent rechecks.
-                # An exception proves no assumption false, so fail only
-                # this task and keep its ground standing.
-                task.state = TaskState.FAILED
+                # An exception proves nothing -- not that the ground is
+                # false, and not that the work is: it already passed its
+                # audit when it ran. So the task stays DONE and the error
+                # is recorded; the next recheck asks again. Failing it here
+                # would be permanent, since nothing re-runs a FAILED task.
                 self.ledger.record(
                     self.round,
-                    Event.FAILED,
+                    Event.AUDIT_ERROR,
                     name,
                     f"auditor error: {exc}",
                     node_id=task.node_id,

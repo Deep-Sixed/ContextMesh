@@ -29,8 +29,10 @@ def _claim(graph, label, source, *, id=None):
     )
 
 
-def _decision(graph, label, source, *, id=None):
-    return DecisionLog(graph).decide(label, "fixture", source_id=source.id, id=id)
+def _decision(graph, label, source, *, id=None, assumptions=()):
+    return DecisionLog(graph).decide(
+        label, "fixture", source_id=source.id, id=id, assumptions=assumptions
+    )
 
 
 def _evidence(graph, label="Contradiction", *, kind="disproof", id=None):
@@ -129,13 +131,18 @@ class CombinedBindingAndDependencyTest(unittest.TestCase):
         )
         self.edge_x = self.graph.add_edge(self.claim.id, EdgeType.SUPPORTS, self.decision_x.id)
 
-        self.decision_y = _decision(
-            self.graph, "Adopt tenant-aware sizing", self.source, id="decision:y"
-        )
-
         self.assumption = self.ledger.assume("Shard count grows linearly with corpus size")
         self.ledger.justifies(self.assumption.id, self.edge_x.id)
-        self.graph.add_edge(self.decision_y.id, EdgeType.DEPENDS_ON, self.assumption.id)
+        # Y's dependency is recorded by decide() itself. Adding it afterwards
+        # made this graph one that failed to load (Y is an explicit-id
+        # decision), and is now refused.
+        self.decision_y = _decision(
+            self.graph,
+            "Adopt tenant-aware sizing",
+            self.source,
+            id="decision:y",
+            assumptions=[self.assumption.id],
+        )
 
     def test_reject_kills_the_binding_and_the_dependency_but_not_x_s_endpoints(self):
         report = self.ledger.reject(

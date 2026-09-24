@@ -69,7 +69,7 @@ A: dead end — entity_unresolved
 
 ## The ontology is a file
 
-[`GRAPH.md`](GRAPH.md) is not documentation of the schema. It **is** the schema:
+[`GRAPH.md`](contextmesh/GRAPH.md) is not documentation of the schema. It **is** the schema:
 `contextmesh/ontology.py` parses it at import time, and every write typechecks
 against it.
 

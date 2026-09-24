@@ -21,6 +21,7 @@ from contextmesh.llm import (
     LLMConfigurationError,
     LLMProviderError,
     LLMRequestTooLargeError,
+    LLMResponseTooLargeError,
     LLMResponseError,
     LLMSchemaError,
     LLMTransportError,
@@ -940,11 +941,13 @@ class RedirectRefusalTest(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(json.loads(response.body), {"ok": True})
 
-    def oversized_server(self, *, status=200):
+    def oversized_server(self, *, status=200, hits=None):
         payload = b"x" * 4096
 
         class Oversized(BaseHTTPRequestHandler):
             def do_POST(self):
+                if hits is not None:
+                    hits.append(status)
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -958,15 +961,55 @@ class RedirectRefusalTest(unittest.TestCase):
     def test_an_oversized_success_body_is_refused_without_buffering_it(self):
         port = self.oversized_server(status=200)
         request = self.request_to(port, max_response_bytes=1024)
-        with self.assertRaisesRegex(LLMTransportError, "1024-byte limit"):
+        pattern = r"HTTP 200.*1024-byte limit"
+        with self.assertRaisesRegex(LLMResponseTooLargeError, pattern) as caught:
             UrllibTransport()(request)
+        self.assertEqual(caught.exception.status, 200)
+        # Not a transport failure: a response was obtained, so it must not be
+        # retried as if the network had dropped.
+        self.assertNotIsInstance(caught.exception, LLMTransportError)
 
-    def test_an_oversized_error_body_is_refused_the_same_way(self):
-        """A provider returning a huge *error* page is the same memory risk."""
+    def test_an_oversized_error_body_is_dropped_and_the_status_kept(self):
+        """A huge *error* page is the same memory risk, but nothing reads an
+        error body, so it is discarded after the bounded read and the status
+        is what the client acts on."""
         port = self.oversized_server(status=500)
         request = self.request_to(port, max_response_bytes=1024)
-        with self.assertRaisesRegex(LLMTransportError, "1024-byte limit"):
-            UrllibTransport()(request)
+        response = UrllibTransport()(request)
+        self.assertEqual(response.status, 500)
+        self.assertEqual(response.body, b"")
+
+    def client(self):
+        return LLMClient(
+            LLMConfig(provider="openai", model="gpt-test", api_key="sk-not-a-real-key"),
+            transport=UrllibTransport(),
+            sleep=lambda _seconds: None,
+        )
+
+    def test_an_oversized_success_is_not_retried(self):
+        hits = []
+        port = self.oversized_server(status=200, hits=hits)
+        with self.assertRaisesRegex(LLMResponseTooLargeError, "1024-byte limit"):
+            self.client()._send(self.request_to(port, max_response_bytes=1024))
+        self.assertEqual(hits, [200])
+
+    def test_an_oversized_client_error_fails_closed_on_the_first_attempt(self):
+        hits = []
+        port = self.oversized_server(status=400, hits=hits)
+        with self.assertRaises(LLMProviderError) as caught:
+            self.client()._send(self.request_to(port, max_response_bytes=1024))
+        self.assertEqual(caught.exception.status, 400)
+        self.assertIn("failed closed", str(caught.exception))
+        self.assertEqual(hits, [400])
+
+    def test_an_oversized_server_error_keeps_its_retry_semantics(self):
+        hits = []
+        port = self.oversized_server(status=503, hits=hits)
+        client = self.client()
+        with self.assertRaises(LLMProviderError) as caught:
+            client._send(self.request_to(port, max_response_bytes=1024))
+        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual(len(hits), client.config.max_attempts)
 
     def test_a_body_at_exactly_the_limit_is_accepted(self):
         port = self.oversized_server(status=200)

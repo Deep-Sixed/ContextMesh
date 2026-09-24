@@ -279,10 +279,16 @@ def mesh_recheck(
         reports = evidence_recheck(runner, require_evidence=True)
         new_entries = runner.ledger.entries[before:]
         audited = sum(1 for entry in new_entries if entry.event is Event.AUDITED)
+        audit_errors = [
+            {"task": entry.task, "error": entry.detail}
+            for entry in new_entries
+            if entry.event is Event.AUDIT_ERROR
+        ]
         return (
             {
                 "round": runner.round,
                 "audited": audited,
+                "audit_errors": audit_errors,
                 "invalidations": [report.to_dict() for report in reports],
                 "ledger_head": runner.ledger.head,
             },

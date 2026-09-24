@@ -132,6 +132,11 @@ class AssumptionLedger:
         digest is truncated, GRAPH.md rule 8) is a collision, not a reuse,
         and is refused the same way ``add_assumption`` refuses one.
 
+        A reuse that asks for justification the existing record does not
+        already carry is refused too. Returning the record unchanged would
+        tell the caller its evidence was recorded when no ``justified_by``
+        edge was written -- the no-op would silently drop part of the call.
+
         The write is atomic: if any justifying evidence id is invalid, the
         assumption this call would have created is rolled back rather than
         left standing without the justification the caller asked for.
@@ -143,6 +148,13 @@ class AssumptionLedger:
                     f"assumption id {existing.id!r} is already "
                     f"{existing.statement!r}; refusing to treat {statement!r} "
                     "as the same assumption"
+                )
+            missing = [ev for ev in evidence_ids if ev not in existing.evidence_ids]
+            if missing:
+                raise AssumptionError(
+                    f"assumption {existing.id!r} already exists "
+                    f"({existing.status.value}) without evidence {missing!r}; "
+                    "re-asking the same statement does not add justification"
                 )
             return existing
 
@@ -223,7 +235,13 @@ class AssumptionLedger:
         edge.assumption_id = assumption_id
 
     def depends(self, node_id: str, assumption_id: str) -> None:
-        """Wire a decision or claim to the assumption it rests on."""
+        """Wire a decision or claim to the assumption it rests on.
+
+        An explicit-id decision takes its assumptions through
+        ``DecisionLog.decide(assumptions=...)`` instead; adding one here
+        afterwards is refused, because it would change the content that
+        decision's digest vouches for.
+        """
         self.graph.add_edge(node_id, EdgeType.DEPENDS_ON, assumption_id)
 
     # ── the interesting part ─────────────────────────────────────────────
@@ -288,6 +306,12 @@ class AssumptionLedger:
 
         GRAPH.md Rule 7: An assumption is only ever rejected by evidence that
         contradicts it. A valid, live NodeType.EVIDENCE node is required.
+
+        ``replacement`` must be new ground. A statement that already names an
+        assumption -- the one being rejected, or any other, in any state --
+        is refused before anything is written: reusing it would rewrite that
+        record's version and lineage in place, and re-grounding on the
+        rejected statement itself would make it supersede itself.
         """
         if not evidence_id or not isinstance(evidence_id, str):
             raise AssumptionError("reject() requires a non-empty evidence_id string")
@@ -316,6 +340,17 @@ class AssumptionLedger:
             raise AssumptionError(
                 f"evidence_id {evidence_id!r} is invalidated"
             )
+
+        if replacement:
+            replacement_id = slug(replacement, "assumption")
+            clash = graph.assumptions.get(replacement_id)
+            if clash is not None or replacement_id in graph.nodes:
+                named = clash.statement if clash is not None else replacement
+                raise AssumptionError(
+                    f"replacement {replacement!r} is not new ground: id "
+                    f"{replacement_id!r} already names {named!r}"
+                    + (f" ({clash.status.value})" if clash is not None else "")
+                )
 
         radius = self.blast_radius(assumption_id)
         node = graph.node(assumption_id)

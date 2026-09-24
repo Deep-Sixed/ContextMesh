@@ -86,7 +86,7 @@ from .resolve import ResolutionRecord, Resolver
 from .telemetry import TelemetryProjection, project_telemetry
 from .traverse import DeadEnd, Walk, Walker
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "LIVE_PROVIDERS",

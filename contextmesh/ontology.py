@@ -1,6 +1,6 @@
 """The ontology is a file, not a constant.
 
-``GRAPH.md`` at the repository root is the schema. This module parses it on
+``GRAPH.md``, shipped inside this package, is the schema. This module parses it on
 import so that a change to the documented edge table is immediately a change to
 what the engine will accept. That is the whole point of the "read on every
 write" line in the dashboard: the ontology cannot drift away from the docs
@@ -14,7 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, FrozenSet, Iterable, Tuple
 
-ONTOLOGY_FILE = Path(__file__).resolve().parent.parent / "GRAPH.md"
+# Inside the package, not beside it: the wheel used to install this as a
+# loose top-level site-packages/GRAPH.md, where any other distribution that
+# shipped or removed a file of that name would break `import contextmesh`.
+ONTOLOGY_FILE = Path(__file__).resolve().parent / "GRAPH.md"
 
 _ROW = re.compile(r"^\|(?P<cells>.+)\|\s*$")
 _PAIR = re.compile(r"(?P<src>[a-z_]+)\s*(?:→|->)\s*(?P<dst>[a-z_]+)")

@@ -316,9 +316,14 @@ class EvidenceIntake:
         external_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> EvidenceReceipt:
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str):
             raise EvidenceIntakeError("text must be a non-empty string")
+        # Bounded before strip() for the same reason external_id is below:
+        # stripping first allocates a temporary proportional to whatever the
+        # caller sent before the limit gets a chance to refuse it.
         _check_string_bytes(text, MAX_TEXT_BYTES, "text")
+        if not text.strip():
+            raise EvidenceIntakeError("text must be a non-empty string")
         if not isinstance(source_id, str) or not source_id.strip():
             raise EvidenceIntakeError("source_id must be a non-empty string")
         source = self.graph.get(source_id)
