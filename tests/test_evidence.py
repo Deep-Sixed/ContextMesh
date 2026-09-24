@@ -122,6 +122,25 @@ class EvidenceIntakeTest(unittest.TestCase):
         # The boundary itself is accepted: this is a limit, not an off-by-one trap.
         self.submit(text="x" * MAX_TEXT_BYTES, external_id="at-the-text-limit")
 
+    def test_oversized_text_is_refused_before_it_is_stripped(self):
+        """strip() on an oversized string allocates a copy of it before the
+        limit can refuse it -- the reason external_id is bounded first. Text
+        used to be stripped first."""
+        stripped = []
+
+        class Recording(str):
+            def strip(self, *args):
+                stripped.append(len(self))
+                return super().strip(*args)
+
+        with self.assertRaisesRegex(EvidenceIntakeError, "byte limit"):
+            self.submit(text=Recording(" " * (MAX_TEXT_BYTES + 1)))
+        self.assertEqual(stripped, [])
+        # Blank text within the limit is still refused as blank.
+        with self.assertRaisesRegex(EvidenceIntakeError, "non-empty"):
+            self.submit(text=Recording("   "))
+        self.assertEqual(stripped, [3])
+
     def test_oversized_metadata_is_refused_before_mutation(self):
         before = self.graph.to_dict()
         with self.assertRaisesRegex(EvidenceIntakeError, "byte limit"):
