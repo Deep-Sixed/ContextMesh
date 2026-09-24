@@ -687,5 +687,117 @@ class DecisionToDecisionDependsOnDoesNotPolluteIdentityTest(unittest.TestCase):
         self.assertEqual(again.id, downstream.id)
 
 
+class ExplicitDecisionContentCannotGrowAfterDecideTest(unittest.TestCase):
+    """The fingerprint covers the edges decide() writes, and is checked
+    against the node's actual edges. An edge of one of those kinds added
+    afterwards used to be accepted silently -- and then the correct snapshot
+    failed to load as "tampered with or corrupted", and an identical retry
+    of the original decide() was refused as different content."""
+
+    def setUp(self):
+        self.graph, self.source = _graph_with_source()
+        self.ledger = AssumptionLedger(self.graph)
+        self.log = DecisionLog(self.graph)
+        self.ground = self.ledger.assume("The shard count is stable")
+
+    def decide(self, **extra):
+        return self.log.decide(
+            "Partition the rebuild",
+            "Bounded memory.",
+            source_id=self.source.id,
+            id="decision:partition",
+            **extra,
+        )
+
+    def test_a_later_dependency_on_an_assumption_is_refused_where_it_is_added(self):
+        decision = self.decide()
+        edges = len(self.graph.edges)
+        with self.assertRaisesRegex(OntologyError, "pass it to DecisionLog.decide"):
+            self.ledger.depends(decision.id, self.ground.id)
+        self.assertEqual(len(self.graph.edges), edges)
+        # ...so what was saved still loads, and still retries.
+        restored = ContextGraph.from_dict(self.graph.to_dict())
+        self.assertIs(DecisionLog(restored).decide(
+            "Partition the rebuild",
+            "Bounded memory.",
+            source_id=self.source.id,
+            id="decision:partition",
+        ).id, decision.id)
+
+    def test_the_same_dependency_passed_to_decide_is_its_own_content(self):
+        decision = self.decide(assumptions=[self.ground.id])
+        ContextGraph.from_dict(self.graph.to_dict())
+        # Repeating an edge the decision already has is not new content.
+        self.ledger.depends(decision.id, self.ground.id)
+        ContextGraph.from_dict(self.graph.to_dict())
+
+    def test_auto_minted_decisions_are_not_frozen_by_this(self):
+        decision = self.log.decide("Auto", "No id.", source_id=self.source.id)
+        self.ledger.depends(decision.id, self.ground.id)
+        ContextGraph.from_dict(self.graph.to_dict())
+
+    def test_a_decision_is_not_accepted_as_an_assumption(self):
+        upstream = self.log.decide("Upstream", "r", source_id=self.source.id, id="decision:up")
+        nodes, edges = len(self.graph.nodes), len(self.graph.edges)
+        with self.assertRaisesRegex(OntologyError, "takes assumption ids"):
+            self.decide(assumptions=[upstream.id])
+        self.assertEqual((len(self.graph.nodes), len(self.graph.edges)), (nodes, edges))
+
+
+class ProjectionRewindsExplicitDecisionDigestTest(unittest.TestCase):
+    """as_of_graph keeps a decision by its own date and drops an edge whose
+    other end came later. The stored digest still covered that edge, so the
+    loader rejected the projection as tampered and the time-travel query
+    crashed instead of answering."""
+
+    def build(self, explicit):
+        graph = ContextGraph()
+        graph.build = 1
+        early = graph.add_node(
+            NodeType.SOURCE, "2024 review",
+            attrs={"origin": "review", "retrieved_at": "2024-03-01"},
+        )
+        late = graph.add_node(
+            NodeType.SOURCE, "2025 review",
+            attrs={"origin": "review", "retrieved_at": "2025-03-01"},
+        )
+        claim = graph.add_node(
+            NodeType.CLAIM, "later evidence", provenance=Provenance(source_id=late.id)
+        )
+        graph.add_edge(claim.id, EdgeType.DERIVED_FROM, late.id)
+        extra = {"id": "decision:choose-x"} if explicit else {}
+        decision = DecisionLog(graph).decide(
+            "Choose X", "because", source_id=early.id, supported_by=[claim.id], **extra
+        )
+        return graph, decision, claim
+
+    def test_the_projection_answers_and_keeps_the_decision_without_the_later_edge(self):
+        from contextmesh.temporal import as_of_graph
+
+        graph, decision, claim = self.build(explicit=True)
+        projection = as_of_graph(graph, "2024-06-01")
+        self.assertIn(decision.id, projection.nodes)
+        self.assertNotIn(claim.id, projection.nodes)
+        # A graph the ordinary loader accepts, not a special case of it.
+        ContextGraph.from_dict(projection.to_dict())
+        # And the live graph's own record is untouched.
+        self.assertEqual(
+            graph.node(decision.id).attrs["decision_payload_digest"],
+            ContextGraph.from_dict(graph.to_dict())
+            .node(decision.id)
+            .attrs["decision_payload_digest"],
+        )
+
+    def test_a_horizon_that_keeps_every_edge_keeps_the_digest(self):
+        from contextmesh.temporal import as_of_graph
+
+        graph, decision, _ = self.build(explicit=True)
+        projection = as_of_graph(graph, "2030-01-01")
+        self.assertEqual(
+            projection.node(decision.id).attrs["decision_payload_digest"],
+            graph.node(decision.id).attrs["decision_payload_digest"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

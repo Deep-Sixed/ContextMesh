@@ -163,6 +163,15 @@ stronger identity scheme: it only protects a caller who reuses one id on
 purpose, the same way `add_node`'s type/label check only protects against
 `slug`'s truncation, and the two checks answer different questions (one
 caller-declared, one derived) that can both apply to the same write.
+Because the check reads the node's actual edges, an explicit-id decision's
+fingerprinted edges are fixed once `decide` returns: `add_edge` refuses a
+new `cites`, `derived_from`, `produces`, `supersedes`, or `depends_on` into
+an assumption out of it, since accepting one would make the next load
+refuse a correct snapshot and the next identical retry refuse the original
+call. (A `depends_on` into another decision is a task ordering, not part of
+the decision, and is still added freely.) A time-travel projection that
+drops such an edge because its other end came later re-derives the digest
+for what it kept, the same way it rewinds assumption state.
 
 A decision's immutability does not stop at `DecisionLog`, and neither does
 the trust boundary around its identity metadata. `add_node` refuses to mint

@@ -129,6 +129,17 @@ class DecisionLog:
         cites = tuple(cites)
         assumptions = tuple(assumptions)
         produces = tuple(produces)
+        for target in assumptions:
+            # depends_on also legally points decision->decision, but that is a
+            # task ordering wired after decide(), which the fingerprint leaves
+            # out. Accepting one here would store a digest the decision's own
+            # edges can never reproduce: unloadable, and never retriable.
+            found = self.graph.get(target)
+            if found is not None and found.type is not NodeType.ASSUMPTION:
+                raise OntologyError(
+                    f"assumptions= takes assumption ids; {target!r} is a "
+                    f"{found.type.value}"
+                )
         fingerprint = decision_fingerprint(
             title=title,
             rationale=rationale,
@@ -200,7 +211,7 @@ class DecisionLog:
         def _tracked_edge(src: str, etype: EdgeType, dst: str) -> None:
             key = (src, etype.value, dst)
             already = key in self.graph._edge_key
-            edge = self.graph.add_edge(src, etype, dst)
+            edge = self.graph.add_edge(src, etype, dst, _decision_edge_authorized=True)
             if not already:
                 created_edge_ids.append(edge.id)
 

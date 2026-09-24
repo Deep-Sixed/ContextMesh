@@ -235,7 +235,13 @@ class AssumptionLedger:
         edge.assumption_id = assumption_id
 
     def depends(self, node_id: str, assumption_id: str) -> None:
-        """Wire a decision or claim to the assumption it rests on."""
+        """Wire a decision or claim to the assumption it rests on.
+
+        An explicit-id decision takes its assumptions through
+        ``DecisionLog.decide(assumptions=...)`` instead; adding one here
+        afterwards is refused, because it would change the content that
+        decision's digest vouches for.
+        """
         self.graph.add_edge(node_id, EdgeType.DEPENDS_ON, assumption_id)
 
     # ── the interesting part ─────────────────────────────────────────────

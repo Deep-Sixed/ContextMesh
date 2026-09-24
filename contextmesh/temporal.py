@@ -55,7 +55,7 @@ from enum import Enum
 from typing import Any, Dict, Optional
 
 from .graph import ContextGraph
-from .model import AssumptionStatus, EdgeType, Node, NodeType
+from .model import AssumptionStatus, EdgeType, Node, NodeType, decision_fingerprint
 
 #: The source attribute GRAPH.md already requires a ``source`` to carry.
 SOURCE_TIME_ATTR = "retrieved_at"
@@ -339,10 +339,39 @@ def as_of_graph(graph: ContextGraph, as_of: Any) -> ContextGraph:
         for a in payload["assumptions"]
         if a["id"] in kept
     ]
+    for record in payload["nodes"]:
+        _rewind_decision_digest(record, kept, graph)
     _mirror_status(payload)
     projection = ContextGraph.from_dict(payload)
     _replay_invalidation(projection)
     return projection
+
+
+def _rewind_decision_digest(
+    record: Dict[str, Any], kept: Dict[str, Node], graph: ContextGraph
+) -> None:
+    """Fingerprint an explicit-id decision as it stands in the projection.
+
+    A decision survives by its own source date, while an edge survives only
+    if its other end does -- so a decision whose ``supported_by`` claim came
+    later keeps its node and loses that edge. Its stored
+    ``decision_payload_digest`` still covers the edge, and the ordinary
+    loader refuses the mismatch as tampering: the projection crashed instead
+    of answering. The digest is wound back to the projected edges the same
+    way assumption state is, so the projection stays a graph the ordinary
+    loader accepts rather than a special case of it.
+    """
+    if (
+        record.get("type") != NodeType.DECISION.value
+        or record.get("attrs", {}).get("decision_identity") != "explicit"
+    ):
+        return
+    structure = graph._decision_structure(record["id"])
+    for name in ("cites", "derived_from", "depends_on", "produces"):
+        structure[name] = {target for target in structure[name] if target in kept}
+    if structure["supersedes"] not in kept:
+        structure["supersedes"] = None
+    record["attrs"]["decision_payload_digest"] = decision_fingerprint(**structure)
 
 
 def _replay_invalidation(projection: ContextGraph) -> None:
