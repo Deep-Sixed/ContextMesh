@@ -18,43 +18,74 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify release tag matches package metadata
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          import tomllib
-
-          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
-          expected_name = "contextmesh-graph"
-          expected_tag = f"v{project['version']}"
-          actual_tag = os.environ["GITHUB_REF_NAME"]
-
-          assert project["name"] == expected_name, (project["name"], expected_name)
-          assert os.environ["GITHUB_REF_TYPE"] == "tag", os.environ["GITHUB_REF_TYPE"]
-          assert actual_tag == expected_tag, (actual_tag, expected_tag)
-          print(f"release identity: {project['name']} {project['version']} from {actual_tag}")
-          PY
-
       - name: Build and check wheel and sdist
         run: |
           python -m pip install --upgrade pip
-          python -m pip install build twine
+          python -m pip install build packaging twine
           python -m build
           python -m twine check dist/*
-          python - <<'PY'
-          from pathlib import Path
-          import tomllib
 
-          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
-          wheels = list(Path("dist").glob("*.whl"))
-          sdists = list(Path("dist").glob("*.tar.gz"))
-          assert len(wheels) == 1, wheels
-          assert len(sdists) == 1, sdists
-          assert wheels[0].name.startswith(f"contextmesh_graph-{version}-"), wheels[0]
-          assert sdists[0].name == f"contextmesh_graph-{version}.tar.gz", sdists[0]
-          print(wheels[0])
-          print(sdists[0])
+      # Checked against the built wheel's own metadata rather than pyproject.toml:
+      # that is what PyPI receives. Explicit exits, not `assert`, which `python -O`
+      # or PYTHONOPTIMIZE would strip.
+      - name: Verify release identity
+        env:
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+          from email.parser import Parser
+          from pathlib import Path
+
+          from packaging.utils import canonicalize_name
+          from packaging.version import InvalidVersion, Version
+
+          def fail(message):
+              raise SystemExit(f"::error::{message}")
+
+          wheels = sorted(Path("dist").glob("*.whl"))
+          sdists = sorted(Path("dist").glob("*.tar.gz"))
+          if len(wheels) != 1 or len(sdists) != 1:
+              fail(f"expected one wheel and one sdist, found {wheels} and {sdists}")
+          wheel, sdist = wheels[0], sdists[0]
+
+          with zipfile.ZipFile(wheel) as archive:
+              found = [n for n in archive.namelist() if n.endswith(".dist-info/METADATA")]
+              if len(found) != 1:
+                  fail(f"expected one METADATA file in {wheel.name}, found {found}")
+              metadata = Parser().parsestr(archive.read(found[0]).decode("utf-8"))
+          name, version = metadata["Name"], Version(metadata["Version"])
+
+          if canonicalize_name(name) != "contextmesh-graph":
+              fail(f"built distribution is {name!r}, not contextmesh-graph")
+          if os.environ["GITHUB_REF_TYPE"] != "tag":
+              fail(f"release ref is a {os.environ['GITHUB_REF_TYPE']}, not a tag")
+          tag = os.environ["GITHUB_REF_NAME"]
+          try:
+              tagged = Version(tag[1:]) if tag.startswith("v") else None
+          except InvalidVersion:
+              tagged = None
+          if tagged != version:
+              fail(f"tag {tag} does not name the built version {version}")
+
+          # The release type has to agree with the version, or a GitHub pre-release
+          # cut to test the pipeline becomes what `pip install contextmesh-graph` gets.
+          prerelease = os.environ["RELEASE_PRERELEASE"] == "true"
+          if prerelease and not version.is_prerelease:
+              fail(f"GitHub pre-release {tag} carries the final version {version}")
+          if version.is_prerelease and not prerelease:
+              fail(f"{version} is a pre-release version; mark the GitHub release as one")
+
+          # Filenames carry the normalized version: v1.0.0-rc.1 builds 1.0.0rc1.
+          stem = f"contextmesh_graph-{version}"
+          if not wheel.name.startswith(f"{stem}-"):
+              fail(f"wheel {wheel.name} does not start with {stem}-")
+          if sdist.name != f"{stem}.tar.gz":
+              fail(f"sdist {sdist.name} is not {stem}.tar.gz")
+          print(f"release identity: {name} {version} from {tag}")
+          print(wheel)
+          print(sdist)
           PY
 
       - name: Upload release distributions

@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, FrozenSet, Iterable, Tuple
 
-ONTOLOGY_FILE = Path(__file__).resolve().parent.parent / "GRAPH.md"
+_HERE = Path(__file__).resolve().parent
+#: An installed wheel carries GRAPH.md inside the package (setup.py copies it
+#: there at build time); a source checkout reads the repository-root original.
+ONTOLOGY_FILE = (
+    _HERE / "GRAPH.md" if (_HERE / "GRAPH.md").is_file() else _HERE.parent / "GRAPH.md"
+)
 
 _ROW = re.compile(r"^\|(?P<cells>.+)\|\s*$")
 _PAIR = re.compile(r"(?P<src>[a-z_]+)\s*(?:→|->)\s*(?P<dst>[a-z_]+)")
