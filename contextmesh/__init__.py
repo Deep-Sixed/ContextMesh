@@ -86,7 +86,9 @@ from .resolve import ResolutionRecord, Resolver
 from .telemetry import TelemetryProjection, project_telemetry
 from .traverse import DeadEnd, Walk, Walker
 
-__version__ = "0.1.0"
+# The only copy of the version: pyproject.toml reads the distribution version
+# from here, and contextmesh_mcp re-exports it.
+__version__ = "0.1.1"
 
 __all__ = [
     "LIVE_PROVIDERS",

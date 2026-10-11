@@ -22,11 +22,21 @@ jobs:
           python -m build
           python -m twine check dist/*
           python - <<'PY'
+          import zipfile
           from pathlib import Path
+
+          def fail(message):
+              raise SystemExit(f"::error::{message}")
+
           wheels = list(Path("dist").glob("*.whl"))
           sdists = list(Path("dist").glob("*.tar.gz"))
-          assert len(wheels) == 1, wheels
-          assert len(sdists) == 1, sdists
+          if len(wheels) != 1 or len(sdists) != 1:
+              fail(f"expected one wheel and one sdist, found {wheels} and {sdists}")
+          # GRAPH.md ships inside the package. A top-level copy installs loose in
+          # site-packages, where another distribution's GRAPH.md can replace it.
+          graphs = sorted(n for n in zipfile.ZipFile(wheels[0]).namelist() if n.endswith("GRAPH.md"))
+          if graphs != ["contextmesh/GRAPH.md"]:
+              fail(f"wheel must carry exactly contextmesh/GRAPH.md, found {graphs}")
           print(wheels[0])
           print(sdists[0])
           PY
@@ -57,6 +67,20 @@ jobs:
           import subprocess, sys
           wheel = next(Path("dist").glob("*.whl"))
           subprocess.check_call([sys.executable, "-m", "pip", "install", str(wheel)])
+          PY
+      - name: Installed version strings agree
+        shell: bash
+        run: |
+          python - <<'PY'
+          from importlib.metadata import version
+
+          import contextmesh
+          import contextmesh_mcp
+
+          found = {contextmesh.__version__, contextmesh_mcp.__version__, version("contextmesh-graph")}
+          if len(found) != 1:
+              raise SystemExit(f"::error::installed version strings disagree: {sorted(found)}")
+          print("version", *found)
           PY
       - name: Core has no MCP dependency
         run: python -c "import importlib.util; assert importlib.util.find_spec('mcp') is None"

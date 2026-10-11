@@ -28,6 +28,8 @@ an auditor holding evidence, per GRAPH.md rule 7. A tool that let a client name
 an assumption and have it rejected would make that rule a convention.
 """
 
+from contextmesh import __version__ as __version__  # re-exported: one version for both packages
+
 from .session import Session, SessionError
 from .tools import (
     TOOLS,
@@ -38,8 +40,6 @@ from .tools import (
     mesh_health,
     mesh_lineage,
 )
-
-__version__ = "0.1.0"
 
 __all__ = [
     "TOOLS",

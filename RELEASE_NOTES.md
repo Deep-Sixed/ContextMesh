@@ -1,3 +1,11 @@
+# Unreleased
+
+## Fixed
+
+- `contextmesh.__version__` and `contextmesh_mcp.__version__` match the installed distribution. The `0.1.1` wheel reports `0.1.0` from both. The version is now written once, in `contextmesh/__init__.py`, and the package metadata is read from it.
+- `GRAPH.md` installs inside the `contextmesh` package instead of loose at the top of site-packages, where another distribution's `GRAPH.md` could overwrite or remove it.
+- The publish workflow checks the tag against the built wheel's normalized version, so a tag such as `v1.0.0-rc.1` publishes `1.0.0rc1`, and it refuses a GitHub pre-release that carries a final version, or the reverse.
+
 # ContextMesh v0.1.1
 
 `v0.1.1` is a release-engineering patch for the first PyPI publication of ContextMesh.
