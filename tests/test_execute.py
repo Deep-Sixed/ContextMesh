@@ -305,6 +305,105 @@ class PlainFailureTest(unittest.TestCase):
         self.assertIs(runner.state("boom"), TaskState.FAILED)
         self.assertIn("connection refused", report.failed["boom"])
 
+    def test_a_worker_that_returns_a_non_mapping_fails_the_task_rather_than_the_run(self):
+        for bad in ("not a dict", ["a", "b"], 3):
+            with self.subTest(output=bad):
+                runner = Runner("bad output plan")
+                runner.task("bad", lambda ctx, bad=bad: bad, assumes="the service is up")
+                runner.task(
+                    "fine", counted("fine", self.calls, ok=True), assumes="the sink is up"
+                )
+                report = runner.run()
+                self.assertIs(runner.state("bad"), TaskState.FAILED)
+                self.assertIn("not a mapping", report.failed["bad"])
+                self.assertEqual(runner["bad"].attempt, 0, "no attempt was completed")
+                self.assertIs(runner.state("fine"), TaskState.DONE)
+
+    def test_a_worker_that_returns_none_still_counts_as_empty_output(self):
+        runner = Runner("none plan")
+        runner.task("quiet", lambda ctx: None, assumes="the service is up")
+        runner.run()
+        self.assertIs(runner.state("quiet"), TaskState.DONE)
+        self.assertEqual(runner.output("quiet"), {})
+
+
+class RepairGuardTest(unittest.TestCase):
+    """A repair that cannot leave the task runnable must change nothing."""
+
+    def setUp(self):
+        self.calls = []
+        self.feed = Advisories()
+        self.runner = plan(self.calls, self.feed)
+        self.runner.run()
+        self.feed.publish("argon2-cffi", "CVE-2026-9999")
+        self.runner.recheck()
+
+    def snapshot(self):
+        tasks = [
+            (t.name, t.state, t.assumption_id, t.assumes, t.run, t.audit, t.produces)
+            for t in self.runner.tasks
+        ]
+        return (
+            tasks,
+            json.dumps(self.runner.to_dict(), sort_keys=True, default=str),
+            self.runner.ledger.head,
+            json.dumps(self.runner.graph.to_dict(), sort_keys=True),
+        )
+
+    def test_regrounding_on_the_rejected_statement_is_refused(self):
+        before = self.snapshot()
+        with self.assertRaises(ExecutionError) as caught:
+            self.runner.repair("hashing", assumes="argon2-cffi has no open advisory")
+        self.assertIn("rejected", str(caught.exception))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_repair_without_new_ground_on_rejected_ground_is_refused(self):
+        before = self.snapshot()
+        with self.assertRaises(ExecutionError):
+            self.runner.repair("hashing", produces=("Hasher",))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_repairing_back_to_an_earlier_rejected_ground_writes_no_lineage_cycle(self):
+        """argon2 → bcrypt, bcrypt falls, back to argon2: refused, history intact."""
+        bcrypt = self.runner.repair(
+            "hashing",
+            assumes="bcrypt has no open advisory",
+            run=counted("hashing", self.calls, package="bcrypt"),
+        )
+        argon2_id = bcrypt.supersedes
+        self.runner.run()
+        self.feed.publish("bcrypt", "CVE-2026-0001")
+        self.runner.recheck()
+        self.assertIs(bcrypt.status, AssumptionStatus.REJECTED)
+        with self.assertRaises(ExecutionError):
+            self.runner.repair("hashing", assumes="argon2-cffi has no open advisory")
+        argon2 = self.runner.graph.assumptions[argon2_id]
+        self.assertIsNone(argon2.supersedes)
+        self.assertEqual(argon2.version, 1)
+        self.assertEqual(
+            [a.statement for a in self.runner.assumptions.lineage(bcrypt.id)],
+            ["argon2-cffi has no open advisory", "bcrypt has no open advisory"],
+        )
+
+    def test_regrounding_on_another_tasks_active_ground_leaves_its_lineage_alone(self):
+        shared = self.runner.graph.assumptions[self.runner["base"].assumption_id]
+        new = self.runner.repair("hashing", assumes=shared.statement)
+        self.assertEqual(new.id, shared.id)
+        self.assertIsNone(shared.supersedes, "an existing ground was relabelled a replacement")
+        self.assertEqual(shared.version, 1)
+        self.assertEqual(self.runner["hashing"].assumption_id, shared.id)
+
+    def test_a_task_with_no_assumption_is_refused_before_anything_changes(self):
+        task = self.runner["unrelated"]
+        task.assumption_id = None
+        original_run = task.run
+        entries = len(self.runner.ledger)
+        with self.assertRaises(ExecutionError):
+            self.runner.repair("unrelated", run=counted("x", self.calls))
+        self.assertIs(task.run, original_run)
+        self.assertIs(task.state, TaskState.DONE)
+        self.assertEqual(len(self.runner.ledger), entries)
+
 
 class VerdictTest(unittest.TestCase):
     def context(self):

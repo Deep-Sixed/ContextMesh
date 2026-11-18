@@ -357,6 +357,35 @@ class GenerationTest(unittest.TestCase):
         self.assertIn(stranger.name, names(self.dir))
         self.assertEqual(stranger.read_text(encoding="utf-8"), "mine")
 
+    def test_json_that_only_shares_a_stem_prefix_is_left_alone(self):
+        """``--save ~/Documents`` must not delete ``session-notes.json``.
+
+        The sweep used to match on prefix alone, so any ``*.json`` starting
+        with a companion stem was treated as a superseded generation.
+        """
+        strangers = [
+            "session-notes.json",
+            "graph-export.json",
+            "resolver-backup.json",
+            "execution-plan.json",
+            "runledger-2026.json",
+            "graph-00001.json",
+        ]
+        for name in strangers:
+            (self.dir / name).write_text('{"mine": true}', encoding="utf-8")
+        superseded = self.dir / generation_name(GRAPH_STEM, 1_000_000)
+        superseded.write_text("{}", encoding="utf-8")
+
+        self.session.save(self.dir)
+
+        present = names(self.dir)
+        for name in strangers:
+            self.assertIn(name, present, f"{name} was swept")
+            self.assertEqual(
+                (self.dir / name).read_text(encoding="utf-8"), '{"mine": true}'
+            )
+        self.assertNotIn(superseded.name, present, "a seven-digit generation survived")
+
     def test_an_unreadable_manifest_does_not_roll_the_counter_back_to_zero(self):
         """A directory whose manifest is rubble still gets a valid next save."""
         (self.dir / manifest_name(manifest(self.dir)["generation"])).write_text(

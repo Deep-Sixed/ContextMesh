@@ -221,6 +221,31 @@ class ControlledWriteIntegrationTest(unittest.TestCase):
         self.assertEqual(runner["hashing"].binding(), binding)
         self.assertIs(runner["hashing"].state, TaskState.STALE)
 
+    def test_repair_onto_the_rejected_ground_commits_nothing(self):
+        """A client cannot re-ground stale work on the statement that just fell."""
+        self.submit_cve()
+        self.session = mesh_recheck(self.session, self.checkpointer).session
+        runner = self.session.runner
+        assert runner is not None
+        generation = self.session.generation
+        head = runner.ledger.head
+        rejected = runner["hashing"].assumption_id
+
+        with self.assertRaisesRegex(Exception, "rejected"):
+            mesh_repair(
+                self.session,
+                self.checkpointer,
+                task="hashing",
+                worker_key="auth.hash.bcrypt.v1",
+                assumes="Argon2 has no open advisory",
+            )
+
+        self.assertEqual(self.session.generation, generation)
+        self.assertEqual(Session.load(self.root, registry=deployment()).generation, generation)
+        self.assertEqual(runner.ledger.head, head)
+        self.assertEqual(runner["hashing"].assumption_id, rejected)
+        self.assertIsNone(self.session.graph.assumptions[rejected].supersedes)
+
     def test_repair_and_resume_rerun_only_the_stale_closure(self):
         self.submit_cve()
         self.session = mesh_recheck(self.session, self.checkpointer).session
