@@ -22,6 +22,7 @@ from contextmesh.llm import (
     LLMProviderError,
     LLMRequestTooLargeError,
     LLMResponseError,
+    LLMResponseTooLargeError,
     LLMSchemaError,
     LLMTransportError,
     UrllibTransport,
@@ -974,6 +975,84 @@ class RedirectRefusalTest(unittest.TestCase):
         response = UrllibTransport()(request)
         self.assertEqual(response.status, 200)
         self.assertEqual(len(response.body), 4096)
+
+    def test_an_oversized_response_is_not_retried(self):
+        """The reply was generated and billed; asking again buys another one."""
+        hits: List[int] = []
+        payload = b"x" * 4096
+
+        class Counting(BaseHTTPRequestHandler):
+            def do_POST(self):
+                hits.append(1)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        port = self.serve(Counting)
+        client = LLMClient(
+            LLMConfig(
+                provider="openai",
+                model="gpt-test",
+                api_key="sk-not-a-real-key",
+                max_attempts=3,
+            ),
+            transport=UrllibTransport(),
+            sleep=lambda _seconds: None,
+        )
+        with self.assertRaisesRegex(LLMResponseTooLargeError, "1024-byte limit"):
+            client._send(self.request_to(port, max_response_bytes=1024))
+        self.assertEqual(len(hits), 1)
+
+    def truncating_server(self, *, status):
+        """Announce a chunk, send less of it, hang up: ``IncompleteRead``.
+
+        Chunked on purpose: a short fixed-length body read with a size limit
+        just comes back short, while a short chunk raises from ``http.client``.
+        """
+
+        class Truncating(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                self.wfile.write(b'100\r\n{"partial":')
+                self.wfile.flush()
+                self.close_connection = True
+
+            def log_message(self, *args):
+                pass
+
+        return self.serve(Truncating)
+
+    def test_a_truncated_body_is_a_transport_error_not_a_raw_http_client_error(self):
+        for status in (200, 500):
+            with self.subTest(status=status):
+                port = self.truncating_server(status=status)
+                with self.assertRaises(LLMTransportError) as caught:
+                    UrllibTransport()(self.request_to(port))
+                self.assertNotIsInstance(caught.exception, LLMResponseTooLargeError)
+
+    def test_a_truncated_body_is_retried_then_fails_closed(self):
+        port = self.truncating_server(status=200)
+        client = LLMClient(
+            LLMConfig(
+                provider="openai",
+                model="gpt-test",
+                api_key="sk-not-a-real-key",
+                max_attempts=2,
+            ),
+            transport=UrllibTransport(),
+            sleep=lambda _seconds: None,
+        )
+        with self.assertRaisesRegex(LLMProviderError, "after 2 attempt"):
+            client._send(self.request_to(port))
 
 
 if __name__ == "__main__":

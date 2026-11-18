@@ -16,6 +16,7 @@ validated locally after provider-native JSON-schema controls are requested.
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import os
@@ -40,6 +41,16 @@ class LLMConfigurationError(LLMError):
 
 class LLMTransportError(LLMError):
     """No HTTP response was obtained from the configured provider."""
+
+
+class LLMResponseTooLargeError(LLMTransportError):
+    """The provider's reply exceeded ``max_response_bytes``.
+
+    A transport error, because no usable response was obtained, but never
+    retried: the provider has already generated (and billed for) the reply,
+    and asking again for the same request would only buy another one the
+    same size.
+    """
 
 
 class LLMRequestTooLargeError(LLMError):
@@ -296,7 +307,7 @@ def _bounded_read(readable: Any, max_bytes: int) -> bytes:
     """
     data = readable.read(max_bytes + 1)
     if len(data) > max_bytes:
-        raise LLMTransportError(
+        raise LLMResponseTooLargeError(
             f"provider response exceeded the {max_bytes}-byte limit; refusing to buffer it"
         )
     return data
@@ -315,18 +326,27 @@ class UrllibTransport:
             headers=request.headers,
             method=request.method,
         )
+        # ``http.client.HTTPException`` (a body cut short, a malformed status
+        # line) is not an ``OSError``. It is caught here, including while an
+        # error body is read, so every failure below this line leaves as an
+        # ``LLMError`` rather than escaping as a raw ``http.client`` type.
         try:
-            with self._opener.open(raw, timeout=request.timeout) as response:
-                return HTTPResponse(
-                    status=int(response.status),
-                    headers={str(k): str(v) for k, v in response.headers.items()},
-                    body=_bounded_read(response, request.max_response_bytes),
+            try:
+                with self._opener.open(raw, timeout=request.timeout) as response:
+                    return HTTPResponse(
+                        status=int(response.status),
+                        headers={str(k): str(v) for k, v in response.headers.items()},
+                        body=_bounded_read(response, request.max_response_bytes),
+                    )
+            except urllib.error.HTTPError as exc:
+                body = _bounded_read(exc, request.max_response_bytes)
+                headers = (
+                    {str(k): str(v) for k, v in exc.headers.items()} if exc.headers else {}
                 )
-        except urllib.error.HTTPError as exc:
-            body = _bounded_read(exc, request.max_response_bytes)
-            headers = {str(k): str(v) for k, v in exc.headers.items()} if exc.headers else {}
-            return HTTPResponse(status=int(exc.code), headers=headers, body=body)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                return HTTPResponse(status=int(exc.code), headers=headers, body=body)
+        except LLMTransportError:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             raise LLMTransportError("provider request did not return an HTTP response") from exc
 
 
@@ -921,6 +941,9 @@ class LLMClient:
         for attempt in range(1, self.config.max_attempts + 1):
             try:
                 response = self.transport(request)
+            except LLMResponseTooLargeError:
+                # Deterministic for this request, and already paid for once.
+                raise
             except (LLMTransportError, TimeoutError, OSError):
                 if attempt == self.config.max_attempts:
                     raise LLMProviderError(
@@ -1173,6 +1196,7 @@ __all__ = [
     "LLMProviderError",
     "LLMProvenance",
     "LLMRequestTooLargeError",
+    "LLMResponseTooLargeError",
     "LLMResponseError",
     "LLMResult",
     "LLMSchemaError",

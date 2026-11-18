@@ -108,6 +108,13 @@ _SESSION_V2_KEYS = frozenset(
 )
 _LEDGER_HEAD_RE = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_MANIFEST_RE = re.compile(r"^session-(?P<generation>[0-9]{6})[.]json$")
+#: Every name a generation can own, manifest included. ``{6,}`` because
+#: ``generation_name`` zero-pads to six digits and keeps going past 999999.
+_GENERATION_FILE_RE = re.compile(
+    r"^(?:"
+    + "|".join(re.escape(stem) for stem in (SESSION_MANIFEST_STEM, *(s for _, s in COMPANIONS)))
+    + r")-[0-9]{6,}[.]json$"
+)
 
 #: How often a served session is written back. ``every-ask`` is the default
 #: because a question is a write here and a lost write is silent; the cost is
@@ -943,10 +950,10 @@ class Session:
             name = entry.name
             if name in keep or not entry.is_file():
                 continue
-            superseded = name.endswith(".json") and (
-                any(name.startswith(f"{stem}-") for _, stem in COMPANIONS)
-                or name.startswith(f"{SESSION_MANIFEST_STEM}-")
-            )
+            # Only the exact names ``generation_name`` writes. A prefix match
+            # would also take ``session-notes.json`` or ``graph-export.json``
+            # from a directory someone pointed ``--save`` at.
+            superseded = _GENERATION_FILE_RE.fullmatch(name) is not None
             abandoned = name.startswith(STAGING_PREFIX) and name.endswith(STAGING_SUFFIX)
             if superseded or abandoned:
                 try:

@@ -42,7 +42,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from .assumptions import AssumptionLedger, InvalidationReport
 from .decisions import DecisionLog
@@ -1744,10 +1744,35 @@ class Runner:
             assert table is not None
             audit = table.auditor(auditor_key)
         old = self.graph.assumptions.get(task.assumption_id or "")
+        # Every refusal happens before anything is written: a repair that
+        # cannot complete must leave the task, the ledger and the graph as
+        # they were.
+        if not assumes and old is None:
+            raise ExecutionError(f"task {name!r} has no assumption to repair")
+        target_id = slug(assumes, "assumption") if assumes else old.id
+        reused = self.graph.assumptions.get(target_id)
+        if (
+            reused is not None
+            and (not assumes or reused.statement == assumes)
+            and reused.status is not AssumptionStatus.ACTIVE
+        ):
+            # Re-grounding on a rejected or superseded statement would leave
+            # the task blocked, and linking it as the "replacement" of the
+            # current ground would write a supersedes cycle into the lineage.
+            raise ExecutionError(
+                f"repair of {name!r} would ground it on {reused.statement!r}, "
+                f"which is {reused.status.value}; a repair needs a new statement "
+                "or one that is still active"
+            )
         new = old
         if assumes:
             new = self._assume(assumes)
-            if old is not None and new.id != old.id and new.supersedes is None:
+            # Only a statement this repair minted becomes the replacement. An
+            # existing assumption already has its own place in the lineage
+            # (another task may stand on it), and rewriting its ``supersedes``
+            # would claim a history that never happened.
+            minted = reused is None
+            if minted and old is not None and new.id != old.id:
                 new.version = old.version + 1
                 new.supersedes = old.id
                 old.superseded_by = new.id
@@ -1769,16 +1794,15 @@ class Runner:
         if rationale is not None:
             task.rationale = rationale
         task.state = TaskState.STALE
+        assert new is not None
         self.ledger.record(
             self.round,
             Event.REPAIRED,
             name,
-            f"reground on: {new.statement}" if new is not None else "repaired",
+            f"reground on: {new.statement}",
             node_id=task.node_id,
-            assumption_id=new.id if new is not None else None,
+            assumption_id=new.id,
         )
-        if new is None:
-            raise ExecutionError(f"task {name!r} has no assumption to repair")
         return new
 
     # ── durable identity ─────────────────────────────────────────────────
@@ -2155,8 +2179,24 @@ class Runner:
             )
             return None
 
+        if output is None:
+            output = {}
+        if not isinstance(output, Mapping):
+            # Same contract as a worker that raises: a failed task, not a
+            # crashed scheduler. Checked before ``attempt`` moves so a bad
+            # return leaves the task's history as it was.
+            task.state = TaskState.FAILED
+            self.ledger.record(
+                self.round,
+                Event.FAILED,
+                task.name,
+                f"worker returned {type(output).__name__}, not a mapping",
+                assumption_id=assumption.id,
+            )
+            return None
+
         task.attempt += 1
-        task.output = dict(output or {})
+        task.output = dict(output)
 
         try:
             verdict = self._audit(task, task.output, assumption)
