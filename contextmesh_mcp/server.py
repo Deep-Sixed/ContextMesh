@@ -40,9 +40,11 @@ from . import resources, tools, writes
 from .session import (
     Checkpointer,
     SessionError,
+    _refresh_only_flags,
     add_source_arguments,
     adopt,
     open_session,
+    run_refresh,
     session,
 )
 
@@ -296,6 +298,10 @@ def main(
     args = parser.parse_args(argv)
 
     try:
+        _refresh_only_flags(args)
+        if args.refresh is not None:
+            print(json.dumps(run_refresh(args, registry=registry), indent=2, sort_keys=True))
+            return 0
         opened = open_session(args, registry=registry)
     except SessionError as exc:
         print(f"contextmesh-mcp: {exc}", file=sys.stderr)

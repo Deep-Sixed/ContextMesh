@@ -55,7 +55,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .assumptions import AssumptionLedger
 from .graph import ContextGraph
-from .model import NodeType, slug
+from .model import EdgeType, NodeType, slug
 from .pipeline import BuildReport, Document, Pipeline
 from .resolve import Resolver
 from .traverse import Walker
@@ -528,6 +528,7 @@ def read_folder(
     max_files: int = DEFAULT_MAX_FILES,
     max_bytes: int = DEFAULT_MAX_BYTES,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    allow_empty: bool = False,
 ) -> Tuple[Path, List[ParsedFile], List[Skipped]]:
     base = Path(root).expanduser()
     if not base.exists():
@@ -566,7 +567,7 @@ def read_folder(
             skipped.append(Skipped(rel, "no prose"))
             continue
         files.append(parsed)
-    if not files:
+    if not files and not allow_empty:
         over = sum(s.reason == total_limit_reason(max_total_bytes) for s in skipped)
         raise IngestError(
             f"no readable Markdown or text files under {base}"
@@ -782,6 +783,100 @@ def _utc_iso(timestamp: float) -> str:
     )
 
 
+def grade_entities(
+    graph: ContextGraph, resolver: Resolver, entities: Dict[str, str]
+) -> Dict[str, str]:
+    """Grade each entity by how it was found; returns entity id -> grade.
+
+    Aliases folded into one id take the best grade any of their surface forms
+    earned. A refresh calls this again over the whole current corpus, so a
+    grade can rise but an entity is never removed.
+    """
+    rank = {HIGH: 2, MEDIUM: 1, LOW: 0}
+    entity_confidence: Dict[str, str] = {}
+    for name, conf in entities.items():
+        record = resolver.match(name)
+        if record is None:
+            continue
+        entity_id = record[0]
+        prior = entity_confidence.get(entity_id)
+        if prior is None or rank[conf] > rank[prior]:
+            entity_confidence[entity_id] = conf
+    for entity_id, conf in entity_confidence.items():
+        node = graph.nodes.get(entity_id)
+        if node is not None and node.type is NodeType.ENTITY:
+            current = node.attrs.get("confidence")
+            if current is not None and rank.get(current, 0) >= rank[conf]:
+                continue
+            node.attrs["confidence"] = conf
+            node.attrs["extraction"] = "marked-up" if conf == HIGH else "capitalised-phrase"
+    return entity_confidence
+
+
+def label_sources(
+    graph: ContextGraph, docs: Sequence[Document], files: Sequence[ParsedFile]
+) -> None:
+    """Say what each new source version's date and offsets actually rest on."""
+    for doc, parsed in zip(docs, files):
+        node = graph.nodes.get(doc.id)
+        if node is None:
+            continue
+        node.attrs.update({
+            # retrieved_at is temporal.py's *source time*. For a file the best
+            # evidence of when its content existed is when it was last
+            # modified, so that is what it holds — labelled as such, because a
+            # modification time does not show when the content was written,
+            # checked or verified.
+            "source_time_basis": "file-modified",
+            "modified_at": _utc_iso(parsed.mtime),
+            "encoding": parsed.encoding,
+            "newlines": parsed.newlines,
+            # Claim spans index this text, not the raw bytes.
+            "span_basis": "characters of the decoded text, newlines normalised to \\n",
+            "path": parsed.path,
+            "sha256": parsed.sha256,
+            "size_bytes": parsed.size_bytes,
+            # The version a refresh compares the folder against. Older
+            # versions stay in the graph as history with this set False.
+            "current": True,
+        })
+        # A file reverted to an earlier content is that earlier version again.
+        node.attrs.pop("replaced_at_build", None)
+        node.attrs.pop("deleted_at_build", None)
+
+
+def assume_claims(
+    graph: ContextGraph,
+    ledger: AssumptionLedger,
+    docs: Sequence[Document],
+    files: Sequence[ParsedFile],
+) -> List[str]:
+    """Give every claim lifted from these source versions its assumption.
+
+    Every claim rests on its file still saying it. A refresh retires a
+    sentence a file stopped saying by rejecting this assumption with re-read
+    evidence (GRAPH.md rule 7), so exactly what was built on that claim falls
+    with it and nothing else does (rule 2). Claims are taken in graph order,
+    which is document order, so ids and the ledger's history come out the same
+    on every build. Returns the claim ids it covered.
+    """
+    by_source = {doc.id: parsed for doc, parsed in zip(docs, files)}
+    covered: List[str] = []
+    for node in list(graph.nodes.values()):
+        if node.type is not NodeType.CLAIM or node.provenance is None:
+            continue
+        parsed = by_source.get(node.provenance.source_id)
+        if parsed is None or graph.out_edges(node.id, [EdgeType.DEPENDS_ON], live_only=False):
+            continue
+        assumption = ledger.assume(
+            claim_assumption_statement(parsed.path, parsed.sha256, node.label),
+            created_by=CLAIM_ASSUMPTION_AUTHOR,
+        )
+        ledger.depends(node.id, assumption.id)
+        covered.append(node.id)
+    return covered
+
+
 def build_folder(
     root: Any,
     *,
@@ -807,65 +902,10 @@ def build_folder(
     pipeline = Pipeline(graph, resolver, annotate=_annotator(by_doc))
     report = pipeline.build(docs)
 
-    # Grade each entity by how it was found. Aliases folded into one id take
-    # the best grade any of their surface forms earned.
-    rank = {HIGH: 2, MEDIUM: 1, LOW: 0}
-    entity_confidence: Dict[str, str] = {}
-    for name, conf in entities.items():
-        record = resolver.match(name)
-        if record is None:
-            continue
-        entity_id = record[0]
-        prior = entity_confidence.get(entity_id)
-        if prior is None or rank[conf] > rank[prior]:
-            entity_confidence[entity_id] = conf
-    for entity_id, conf in entity_confidence.items():
-        node = graph.nodes.get(entity_id)
-        if node is not None and node.type is NodeType.ENTITY:
-            node.attrs["confidence"] = conf
-            node.attrs["extraction"] = "marked-up" if conf == HIGH else "capitalised-phrase"
-
-    # Say what each source's date and offsets actually rest on.
-    for doc, parsed in zip(docs, files):
-        node = graph.nodes.get(doc.id)
-        if node is None:
-            continue
-        node.attrs.update({
-            # retrieved_at is temporal.py's *source time*. For a file the best
-            # evidence of when its content existed is when it was last
-            # modified, so that is what it holds — labelled as such, because a
-            # modification time does not show when the content was written,
-            # checked or verified.
-            "source_time_basis": "file-modified",
-            "modified_at": _utc_iso(parsed.mtime),
-            "encoding": parsed.encoding,
-            "newlines": parsed.newlines,
-            # Claim spans index this text, not the raw bytes.
-            "span_basis": "characters of the decoded text, newlines normalised to \\n",
-            "path": parsed.path,
-            "sha256": parsed.sha256,
-            "size_bytes": parsed.size_bytes,
-        })
-
-    # Every claim rests on its file still saying it. A refresh retires a
-    # sentence a file stopped saying by rejecting this assumption with
-    # re-read evidence (GRAPH.md rule 7), so exactly what was built on that
-    # claim falls with it and nothing else does (rule 2). Claims are taken in
-    # graph order, which is document order, so the ids and the ledger's
-    # history come out the same on every build.
+    entity_confidence = grade_entities(graph, resolver, entities)
+    label_sources(graph, docs, files)
     ledger = AssumptionLedger(graph)
-    by_source = {doc.id: parsed for doc, parsed in zip(docs, files)}
-    for node in list(graph.nodes.values()):
-        if node.type is not NodeType.CLAIM or node.provenance is None:
-            continue
-        parsed = by_source.get(node.provenance.source_id)
-        if parsed is None:
-            continue
-        assumption = ledger.assume(
-            claim_assumption_statement(parsed.path, parsed.sha256, node.label),
-            created_by=CLAIM_ASSUMPTION_AUTHOR,
-        )
-        ledger.depends(node.id, assumption.id)
+    assume_claims(graph, ledger, docs, files)
 
     walker = Walker(graph, resolver, hop_budget=hop_budget)
     return FolderBuild(

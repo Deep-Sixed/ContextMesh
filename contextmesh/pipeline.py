@@ -102,6 +102,11 @@ class Document:
     #: corpus, whose ids are unchanged. The trailing ``0`` is the claim's
     #: generation: a sentence that returns after being retired is a new claim.
     claim_scope: str = ""
+    #: Optional override for claim ids, used when adding a document to a graph
+    #: that already holds earlier claims from the same file: returns the id a
+    #: sentence's claim should get, or ``None`` when the sentence is already a
+    #: live claim there and must not be extracted again.
+    claim_id_of: Optional[Callable[[str], Optional[str]]] = None
 
 
 #: ``annotate(doc, start, end, sentence)`` -> extra attrs for the claim lifted
@@ -155,6 +160,11 @@ class BuildReport:
             "pruned_nodes": self.pruned_nodes,
             "stages": [s.to_dict() for s in self.stages],
         }
+
+
+def is_claim(sentence: str) -> bool:
+    """EXTRACT's test: a span becomes a claim only if it asserts something."""
+    return bool(_ASSERTIVE.search(sentence)) and len(sentence.split()) >= 4
 
 
 def claim_id_for(sentence: str, scope: str = "", generation: int = 0) -> str:
@@ -263,10 +273,16 @@ class Pipeline:
 
             # 02 EXTRACT — a span becomes a claim only if it asserts something.
             for start, end, sentence in spans:
-                if not _ASSERTIVE.search(sentence) or len(sentence.split()) < 4:
+                if not is_claim(sentence):
                     extract.dropped += 1
                     continue
-                claim_id = claim_id_for(sentence, doc.claim_scope)
+                if doc.claim_id_of is not None:
+                    claim_id = doc.claim_id_of(sentence)
+                    if claim_id is None:
+                        extract.notes.append(f"kept live claim: {sentence[:60]}")
+                        continue
+                else:
+                    claim_id = claim_id_for(sentence, doc.claim_scope)
                 claim_spans.append((doc, start, end, sentence, claim_id))
                 extract.admitted += 1
 
@@ -377,9 +393,15 @@ class Pipeline:
 
         link.notes.append(f"untyped edges: {graph.untyped_edges}")
 
-        # 05 EMBED — vector on the node.
+        # 05 EMBED — vector on the node. Only nodes this build created: a build
+        # added onto an existing graph must not embed what earlier builds
+        # deliberately left without a vector (assumptions, evidence).
         for node in graph.nodes.values():
-            if node.embedding is None:
+            if (
+                node.embedding is None
+                and node.build == graph.build
+                and node.type is not NodeType.ASSUMPTION
+            ):
                 node.embedding = embed(f"{node.label} {node.attrs.get('rationale', '')}")
                 embed_stage.admitted += 1
 

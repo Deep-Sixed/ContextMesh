@@ -1,7 +1,10 @@
 # Phase 2 — Incremental folder rebuilds
 
-Status: **design approved; slice 1 implemented** (versioned sources, file-scoped
-claims, per-claim assumptions in full builds). Slices 2–4 are not built yet.
+Status: **design approved; slices 1 and 2 implemented.** Slice 2 also took the
+restore (`supersedes`) and location-update parts of slice 3, because a refresh
+without them would reattach a returning sentence to its dead claim and leave
+kept claims pointing at stale lines. Remaining: entity re-discovery across
+unchanged files (slice 3) and the property and persistence tests (slice 4).
 
 Phase 1 (PR #48) builds a graph from a folder in one pass. Every change to the
 folder means rebuilding from scratch, at roughly 15 seconds per MB of text, and
@@ -134,6 +137,12 @@ Parsing is cheap; it's resolution and embedding that cost.
 - Processing time is the build counter: each refresh is one build.
 
 ## Refresh algorithm
+
+Implemented in `contextmesh/refresh.py` (`refresh_folder`, `RefreshReport`).
+One addition found while building it: **a file the folder still has but that
+is skipped this time** (over a size limit, undecodable) is reported as
+`left_as_is` and never treated as deleted. Otherwise hitting the total-size
+cap would silently retire a file's claims.
 
 ```
 refresh(session, folder):

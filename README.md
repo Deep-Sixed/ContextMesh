@@ -77,7 +77,21 @@ python -m contextmesh ingest ~/notes                       # build it, report wh
 python -m contextmesh ask --folder ~/notes "Why did we drop the old cache?"
 python -m contextmesh_mcp --folder ~/notes --save ./notes-session   # keep it
 python -m contextmesh_mcp --session ./notes-session                 # serve it over MCP
+
+# later, after editing the notes: apply only what changed, as the next generation
+python -m contextmesh_mcp --session ./notes-session --refresh ~/notes --dry-run
+python -m contextmesh_mcp --session ./notes-session --refresh ~/notes
 ```
+
+A refresh re-reads the folder and re-extracts only files whose content hash
+changed. Sentences a file still says keep their claims, and whatever was built
+on them. A sentence a file stopped saying (or every claim of a deleted file) is
+retired by evidence naming the old and new file versions. Only what stood on it
+falls, and the report lists it with the chain explaining why. Nothing is
+deleted, and as-of queries still see the text of their time. A deleted file
+cannot date itself, so give `--as-of YYYY-MM-DD` or its retirement is recorded
+as undated. A file that is skipped this time (over a size limit, unreadable) is
+left as it was, never treated as deleted.
 
 ```
 Q: Why does an assumption only fall to evidence?
