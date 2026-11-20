@@ -95,6 +95,13 @@ class Document:
     #: a list item or a paragraph never runs into the next one, and so markup
     #: it has blanked out is never part of a claim.
     segments: List[Tuple[int, int]] = field(default_factory=list)
+    #: When set, claim ids are scoped to it: ``slug("{scope}|{sentence}|0")``
+    #: instead of ``slug(sentence)``. A folder build scopes claims to their
+    #: file, so the same sentence in two files is two claims and one file can
+    #: stop saying it without retiring the other's. Empty for the bundled
+    #: corpus, whose ids are unchanged. The trailing ``0`` is the claim's
+    #: generation: a sentence that returns after being retired is a new claim.
+    claim_scope: str = ""
 
 
 #: ``annotate(doc, start, end, sentence)`` -> extra attrs for the claim lifted
@@ -148,6 +155,13 @@ class BuildReport:
             "pruned_nodes": self.pruned_nodes,
             "stages": [s.to_dict() for s in self.stages],
         }
+
+
+def claim_id_for(sentence: str, scope: str = "", generation: int = 0) -> str:
+    """The id a claim lifted from ``sentence`` gets; see ``Document.claim_scope``."""
+    if not scope:
+        return slug(sentence, NodeType.CLAIM.value)
+    return slug(f"{scope}|{sentence}|{generation}", NodeType.CLAIM.value)
 
 
 class Pipeline:
@@ -252,7 +266,7 @@ class Pipeline:
                 if not _ASSERTIVE.search(sentence) or len(sentence.split()) < 4:
                     extract.dropped += 1
                     continue
-                claim_id = slug(sentence, NodeType.CLAIM.value)
+                claim_id = claim_id_for(sentence, doc.claim_scope)
                 claim_spans.append((doc, start, end, sentence, claim_id))
                 extract.admitted += 1
 

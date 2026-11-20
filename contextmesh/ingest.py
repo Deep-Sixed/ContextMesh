@@ -43,6 +43,7 @@ cap are skipped and reported, never silently dropped.
 from __future__ import annotations
 
 import bisect
+import hashlib
 import os
 import re
 import stat
@@ -110,6 +111,7 @@ class ParsedFile:
     encoding: str = "utf-8"
     newlines: str = "lf"  # lf | crlf | cr | mixed, before normalising to \n
     size_bytes: int = 0  # on disk, as read
+    sha256: str = ""  # of the bytes on disk, as read; names this file version
 
     def __post_init__(self) -> None:
         self._line_starts = [0] + [m.end() for m in re.finditer("\n", self.raw)]
@@ -559,6 +561,7 @@ def read_folder(
         parse = parse_markdown if path.suffix.lower() in MARKDOWN_SUFFIXES else parse_text
         parsed = parse(rel, raw, mtime)
         parsed.encoding, parsed.newlines, parsed.size_bytes = encoding, newlines, len(data)
+        parsed.sha256 = hashlib.sha256(data).hexdigest()
         if not parsed.blocks:
             skipped.append(Skipped(rel, "no prose"))
             continue
@@ -721,8 +724,28 @@ def _annotator(by_doc: Dict[str, ParsedFile]):
     return annotate
 
 
-def source_id_for(rel: str) -> str:
-    return slug(rel, NodeType.SOURCE.value)
+def source_id_for(rel: str, sha256: str) -> str:
+    """One source per *version* of a file: its path and its content hash.
+
+    A refresh adds a new version when the content changes and keeps the old
+    one as history, so evidence and provenance can name the exact text.
+    """
+    return slug(f"{rel}@{sha256[:16]}", NodeType.SOURCE.value)
+
+
+#: Who ``AssumptionLedger.assume`` records as having taken each claim's
+#: "file still says" assumption.
+CLAIM_ASSUMPTION_AUTHOR = "folder-ingest"
+
+
+def claim_assumption_statement(rel: str, sha256: str, sentence: str) -> str:
+    """What every folder claim rests on: that its file still says it.
+
+    The statement names the file version the claim was first read from, so a
+    sentence that is retired and later returns gets a different assumption,
+    never the rejected one back.
+    """
+    return f'{rel}@{sha256[:12]} says: "{sentence}"'
 
 
 def documents_from(
@@ -735,7 +758,7 @@ def documents_from(
         names = [name for name in entities if _words(name) in present]
         docs.append(
             Document(
-                id=source_id_for(f.path),
+                id=source_id_for(f.path, f.sha256),
                 title=f.title,
                 origin=f.path,
                 text=f.clean,
@@ -744,6 +767,7 @@ def documents_from(
                 else "",
                 entities=names,
                 segments=[(b.start, b.end) for b in f.blocks],
+                claim_scope=f.path,
             )
         )
     return docs
@@ -818,7 +842,30 @@ def build_folder(
             "newlines": parsed.newlines,
             # Claim spans index this text, not the raw bytes.
             "span_basis": "characters of the decoded text, newlines normalised to \\n",
+            "path": parsed.path,
+            "sha256": parsed.sha256,
+            "size_bytes": parsed.size_bytes,
         })
+
+    # Every claim rests on its file still saying it. A refresh retires a
+    # sentence a file stopped saying by rejecting this assumption with
+    # re-read evidence (GRAPH.md rule 7), so exactly what was built on that
+    # claim falls with it and nothing else does (rule 2). Claims are taken in
+    # graph order, which is document order, so the ids and the ledger's
+    # history come out the same on every build.
+    ledger = AssumptionLedger(graph)
+    by_source = {doc.id: parsed for doc, parsed in zip(docs, files)}
+    for node in list(graph.nodes.values()):
+        if node.type is not NodeType.CLAIM or node.provenance is None:
+            continue
+        parsed = by_source.get(node.provenance.source_id)
+        if parsed is None:
+            continue
+        assumption = ledger.assume(
+            claim_assumption_statement(parsed.path, parsed.sha256, node.label),
+            created_by=CLAIM_ASSUMPTION_AUTHOR,
+        )
+        ledger.depends(node.id, assumption.id)
 
     walker = Walker(graph, resolver, hop_budget=hop_budget)
     return FolderBuild(
@@ -826,7 +873,7 @@ def build_folder(
         graph=graph,
         resolver=resolver,
         walker=walker,
-        ledger=AssumptionLedger(graph),
+        ledger=ledger,
         report=report,
         documents=docs,
         files=files,

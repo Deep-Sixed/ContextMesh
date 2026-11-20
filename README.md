@@ -110,6 +110,13 @@ What it does, and deliberately does not do:
   form, not when it was written or verified. When the build ran is reported
   as `ingested_at` but kept out of the graph, so rebuilding the same files
   gives the same graph.
+- **Every claim rests on its file still saying it.** Each claim has its own
+  assumption, `"docs/a.md@3f9c… says: …"`, and a source is one *version* of a
+  file, named by its content hash. The same sentence in two files is two
+  claims. This is the groundwork for refreshing a saved session when files
+  change: a sentence a file stops saying can then be retired selectively,
+  through the same evidence-and-assumption mechanism as everything else (see
+  [`docs/PHASE2_INCREMENTAL_REBUILDS.md`](docs/PHASE2_INCREMENTAL_REBUILDS.md)).
 - **No relations are invented.** `contradicts`, `supersedes`, `supports`,
   `depends_on` and `cites` edges are interpretations, so folder ingest writes
   none. Files connect through the entities they share.

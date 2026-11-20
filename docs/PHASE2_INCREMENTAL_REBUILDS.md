@@ -1,6 +1,7 @@
 # Phase 2 — Incremental folder rebuilds
 
-Status: **design, for review before implementation.** Nothing here is built yet.
+Status: **design approved; slice 1 implemented** (versioned sources, file-scoped
+claims, per-claim assumptions in full builds). Slices 2–4 are not built yet.
 
 Phase 1 (PR #48) builds a graph from a folder in one pass. Every change to the
 folder means rebuilding from scratch, at roughly 15 seconds per MB of text, and
@@ -224,6 +225,19 @@ slice measures the real overhead on the generated 4 MB corpus and records it
 in the PR. If it exceeds 15% of peak memory, the decision comes back here
 before going further.
 
+**Measured (slice 1)**, on generated Markdown capped at 3.99 MB (573 files):
+
+| | Before | Slice 1 | Change |
+|---|---|---|---|
+| Peak memory | 1,370 MB | 1,423 MB | +3.9% |
+| Build time | 43.8 s | 46.0 s | +5.0% |
+| Nodes | 35,357 | 69,737 | +97% |
+| Edges | 109,815 | 144,195 | +31% |
+
+The node count doubles, but memory barely moves because the assumption nodes
+carry no embedding. That is well under the 15% threshold, so open decision 1
+is settled: one assumption per claim.
+
 A refresh after a small edit should cost roughly what building the changed
 files from scratch costs, plus a re-read and hash of every file, which is
 cheap. The benchmark slice (Phase 2, item 3) measures it.
@@ -254,10 +268,8 @@ Property tests over sequences of folder states, alongside unit tests:
 
 ## Open decisions
 
-1. **Per-claim assumption overhead.** The proposal above, with a measured
-   threshold. The alternative is a new GRAPH.md mechanism for retracting claims
-   directly. That is cheaper, but it is a schema change, and it means a second
-   way for things to fall.
+1. ~~**Per-claim assumption overhead.**~~ Settled by the slice 1 measurement
+   above (+3.9% peak memory): one assumption per claim.
 2. **Renames.** Treated as delete plus add, so a renamed file's claims fall
    and return under the new path, and anything built on them falls. Detecting
    a rename by identical content hash would avoid that, but it guesses intent.
