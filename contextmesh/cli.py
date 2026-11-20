@@ -6,6 +6,8 @@
     python -m contextmesh export        # write the dashboard's data
     python -m contextmesh invalidate    # break an assumption, show the fallout
     python -m contextmesh execute       # break one, then re-run only what fell
+    python -m contextmesh ingest DIR    # build from your own Markdown/text files
+    python -m contextmesh ask --folder DIR "..."   # ask your files, not the demo
 """
 
 from __future__ import annotations
@@ -148,14 +150,75 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def _source_graph(args: argparse.Namespace) -> Any:
+    """The demo, or a folder build when ``--folder`` names one.
+
+    Returns something with ``graph``, ``resolver`` and ``walker``.
+    """
+    folder = getattr(args, "folder", None)
+    if folder is None:
+        return run(rounds=args.rounds)
+    from .ingest import IngestError, build_folder
+
+    try:
+        return build_folder(folder)
+    except IngestError as exc:
+        raise SystemExit(f"contextmesh: {exc}") from exc
+
+
+def _where(node: Any) -> str:
+    """Where a claim sits in a real file, and how far to trust the lift."""
+    location = node.attrs.get("location")
+    if not location:
+        return ""
+    verified = "verified" if node.attrs.get("verified") else "unverified"
+    return f"   [{location} · {node.attrs.get('confidence', '?')} confidence · {verified}]"
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    from .ingest import IngestError, build_folder
+
+    try:
+        built = build_folder(args.folder)
+    except IngestError as exc:
+        print(f"contextmesh: {exc}", file=sys.stderr)
+        return 2
+    summary = built.summary()
+    if args.json:
+        summary["skipped"] = [{"path": s.path, "reason": s.reason} for s in built.skipped]
+        builtins.print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+    _h(f"INGEST {summary['root']}")
+    print(f"  files read     {summary['files_read']}")
+    print(f"  files skipped  {summary['files_skipped']}")
+    for item in built.skipped[:10]:
+        print(f"                 · {item.path}: {item.reason}")
+    print(f"  nodes live     {_fmt(summary['nodes_live'])}  {summary['by_type']}")
+    print(f"  edges live     {_fmt(summary['edges_live'])}")
+    conf = summary["claim_confidence"]
+    print(f"  claims         high {conf['high']} · medium {conf['medium']} · low {conf['low']}"
+          "  (extraction confidence; none verified)")
+    _h("BUILD PATH")
+    for stage in built.report.stages:
+        print(f"  {stage.name:<8} {stage.caption:<20} admitted {stage.admitted:>6}"
+              f"  dropped {stage.dropped:>6}")
+    print("\nAsk it something:  python -m contextmesh ask --folder "
+          f"{args.folder} \"<question>\"")
+    print("Keep it:           python -m contextmesh_mcp --folder "
+          f"{args.folder} --save <dir>")
+    return 0
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
-    result = run(rounds=args.rounds)
+    result = _source_graph(args)
     for question in args.question:
         walk = result.walker.ask(question)
         print(f"\nQ: {question}")
         if walk.resolved:
             answer = result.graph.node(walk.answer_id)
             print(f"A: {answer.label}")
+            if _where(answer):
+                print(_where(answer))
             print(f"   ({walk.hops} hops, score {walk.score:.2f}, "
                   f"{walk.tokens_walked} tokens against {walk.tokens_flat} flat)")
             print("\n" + walk.path())
@@ -170,7 +233,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
 
 
 def cmd_health(args: argparse.Namespace) -> int:
-    result = run(rounds=args.rounds)
+    result = _source_graph(args)
     signals = check(result.graph, result.resolver, result.walker)
     for signal in signals:
         mark = {"error": "!!", "warn": " !", "info": "  "}[signal.severity]
@@ -341,10 +404,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub.add_parser("demo", help="build, walk, break an assumption, report").set_defaults(
         func=cmd_demo
     )
+    folder_help = "build from Markdown/text files under DIR instead of the demo"
     ask = sub.add_parser("ask", help="ask the graph a question")
     ask.add_argument("question", nargs="+")
+    ask.add_argument("--folder", metavar="DIR", help=folder_help)
     ask.set_defaults(func=cmd_ask)
-    sub.add_parser("health", help="graph health signals").set_defaults(func=cmd_health)
+    health = sub.add_parser("health", help="graph health signals")
+    health.add_argument("--folder", metavar="DIR", help=folder_help)
+    health.set_defaults(func=cmd_health)
+    ingest = sub.add_parser("ingest", help="build a graph from your own files and report it")
+    ingest.add_argument("folder", metavar="DIR")
+    ingest.add_argument("--json", action="store_true", help="machine-readable summary")
+    ingest.set_defaults(func=cmd_ingest)
     sub.add_parser(
         "invalidate", help="reject an assumption and show the blast radius"
     ).set_defaults(func=cmd_invalidate)

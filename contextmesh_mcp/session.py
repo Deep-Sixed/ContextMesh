@@ -53,6 +53,7 @@ from contextmesh.execute import (
     TaskRegistry,
 )
 from contextmesh.graph import ContextGraph
+from contextmesh.ingest import IngestError, build_folder
 from contextmesh.model import NodeType
 from contextmesh.resolve import Resolver
 from contextmesh.traverse import DEFAULT_POLICY, EdgeType, Walker
@@ -808,6 +809,24 @@ class Session:
             rounds=rounds,
         )
 
+    @classmethod
+    def from_folder(cls, folder: Any) -> "Session":
+        """A session over a folder of the user's own Markdown and text files.
+
+        Built fresh and not persistent until saved with ``--save``; reload it
+        afterwards with ``--session``. ``rounds`` is 0 because no demo
+        question stream was walked to warm it.
+        """
+        built = build_folder(folder)
+        return cls(
+            graph=built.graph,
+            resolver=built.resolver,
+            walker=built.walker,
+            ledger=built.ledger,
+            rounds=0,
+            source=f"folder {built.root}",
+        )
+
     def manifest(self, generation: int) -> Dict[str, Any]:
         """The commit point. Names every companion this generation holds."""
         keyed = {
@@ -1263,6 +1282,14 @@ def add_source_arguments(parser: Any) -> Any:
         help="build the bundled demo corpus fresh (not persistent)",
     )
     source.add_argument(
+        "--folder",
+        metavar="DIR",
+        help=(
+            "build from your own Markdown/text files under DIR "
+            "(not persistent; add --save to keep it)"
+        ),
+    )
+    source.add_argument(
         "--session",
         metavar="DIR",
         help=f"load a session directory written by --save ({SESSION_SCHEMA} v{SESSION_VERSION})",
@@ -1303,8 +1330,18 @@ def open_session(
     if getattr(args, "checkpoint", DEFAULT_CHECKPOINT) != DEFAULT_CHECKPOINT:
         raise SessionError(
             "--checkpoint decides when a served session is written back and has "
-            "no meaning for --demo, which has no directory to write to"
+            "no meaning for --demo or --folder, which have no directory to write "
+            "to; --save one first, then serve it with --session"
         )
+    if getattr(args, "folder", None) is not None:
+        if args.rounds is not None:
+            raise SessionError(
+                "--rounds builds a demo graph and has no meaning for --folder"
+            )
+        try:
+            return Session.from_folder(args.folder)
+        except IngestError as exc:
+            raise SessionError(str(exc)) from exc
     return Session.build(rounds=DEFAULT_ROUNDS if args.rounds is None else args.rounds)
 
 

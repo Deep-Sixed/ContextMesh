@@ -11,6 +11,7 @@ import json
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
@@ -43,6 +44,9 @@ def _is_distinctive(token: str) -> bool:
     return len(token) >= 7 and token not in _GENERIC
 
 
+# Pure functions of their argument, called on the same strings many times per
+# resolve; a real folder can mean millions of calls without the cache.
+@lru_cache(maxsize=65536)
 def normalise(text: str) -> str:
     """Casefold, strip punctuation, drop articles and corporate noise."""
     lowered = _NOISE.sub(" ", text.lower())
@@ -51,6 +55,7 @@ def normalise(text: str) -> str:
     return " ".join(parts)
 
 
+@lru_cache(maxsize=65536)
 def acronym(text: str) -> str:
     parts = normalise(text).split()
     return "".join(p[0] for p in parts) if len(parts) > 1 else ""
