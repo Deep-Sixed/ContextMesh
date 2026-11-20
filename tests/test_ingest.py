@@ -62,7 +62,9 @@ The Index Builder reads the Retention Policy before it deletes anything.
 def _write(root: Path, name: str, text: str) -> Path:
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    # Bytes, not write_text: on Windows text mode turns "\n" into "\r\n",
+    # and these tests assert exact newlines and byte counts.
+    path.write_bytes(text.encode("utf-8"))
     return path
 
 
@@ -139,7 +141,7 @@ class EncodingAndTimeTest(unittest.TestCase):
         self.assertEqual(claim.attrs["line_start"], 3)
 
     def test_utf16_without_a_bom_is_skipped_with_a_fix(self):
-        (self.root / "keep.md").write_text(POLICY, encoding="utf-8")
+        _write(self.root, "keep.md", POLICY)
         (self.root / "nobom.md").write_bytes(self.WINDOWS_NOTE.encode("utf-16-le"))
         (self.root / "wide.md").write_bytes(b"\xff\xfe\x00\x00" + "The text.".encode("utf-32-le"))
         _, files, skipped = read_folder(self.root)
