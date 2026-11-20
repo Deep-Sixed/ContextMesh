@@ -3,6 +3,8 @@
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -14,6 +16,8 @@ from contextmesh.ingest import (
     LOW,
     MEDIUM,
     IngestError,
+    _read_bounded,
+    _Unreadable,
     build_folder,
     discover_entities,
     parse_markdown,
@@ -100,6 +104,36 @@ class MarkdownParsingTest(unittest.TestCase):
         kinds = [b.kind for b in parsed.blocks]
         self.assertEqual(kinds.count("heading"), 1)
         self.assertEqual(kinds.count("list"), 2)
+
+
+class PathologicalInputTest(unittest.TestCase):
+    """Inputs that once made a parser regex scan quadratically, or forever."""
+
+    CASES = {
+        "unclosed emphasis": "**x " * 50_000,
+        "unclosed links": "[a](" * 50_000,
+        "unclosed wikilinks": "[[a " * 50_000,
+        "padded heading": "# a" + " " * 200_000 + "b",
+        "many long lines": "\n".join(["**x " * 4_999] * 10),
+    }
+
+    def test_each_parses_in_bounded_time(self):
+        # In a subprocess with a timeout, so a regression fails instead of
+        # hanging the suite.
+        script = (
+            "import sys,json;from contextmesh.ingest import parse_markdown;"
+            "[parse_markdown('x.md', t) for t in json.load(sys.stdin).values()]"
+        )
+        subprocess.run(
+            [sys.executable, "-c", script],
+            input=json.dumps(self.CASES), text=True, cwd=REPO,
+            timeout=60, check=True,
+        )
+
+    def test_a_padded_heading_is_still_a_heading(self):
+        parsed = parse_markdown("x.md", "# Index Builder   ##   \n\nThe Index Builder runs.\n")
+        self.assertEqual(parsed.title, "Index Builder")
+        self.assertEqual(parsed.blocks[0].kind, "heading")
 
 
 class ClaimProvenanceTest(FolderFixture):
@@ -230,6 +264,38 @@ class FolderSafetyTest(unittest.TestCase):
         self.assertEqual([f.path for f in files], ["keep.md"])
         self.assertIn("link.md", [s.path for s in skipped])
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no FIFOs")
+    def test_a_fifo_named_md_is_skipped_not_read(self):
+        # Reading a FIFO blocks until a writer appears, which is never.
+        _write(self.root, "keep.md", POLICY)
+        os.mkfifo(self.root / "pipe.md")
+        _, files, skipped = read_folder(self.root)
+        self.assertEqual([f.path for f in files], ["keep.md"])
+        self.assertIn(("pipe.md", "not a regular file"),
+                      [(s.path, s.reason) for s in skipped])
+
+    def test_the_read_itself_enforces_the_size_limit(self):
+        # The walk checks size, but a file can grow before it is read.
+        path = _write(self.root, "grows.md", "x" * 50)
+        data, _ = _read_bounded(path, 50)
+        self.assertEqual(len(data), 50)
+        with self.assertRaises(_Unreadable):
+            _read_bounded(path, 49)
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "no O_NOFOLLOW")
+    def test_the_read_itself_refuses_a_symlink(self):
+        # A file swapped for a link after the walk must still not be followed.
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        secret = _write(Path(outside.name), "secret.md", "The secret is here.\n")
+        link = self.root / "swapped.md"
+        try:
+            os.symlink(secret, link)
+        except OSError:
+            self.skipTest("symlinks not permitted")
+        with self.assertRaises(_Unreadable):
+            _read_bounded(link, 1000)
+
     def test_file_limit_is_reported_not_silent(self):
         for i in range(3):
             _write(self.root, f"n{i}.md", POLICY)
@@ -268,9 +334,27 @@ class RealRepositoryTest(unittest.TestCase):
         self.assertIsNotNone(walk.dead_end)
 
     def test_build_is_deterministic(self):
-        again = build_folder(REPO / "docs")
-        self.assertEqual(sorted(self.built.graph.nodes), sorted(again.graph.nodes))
-        self.assertEqual(sorted(self.built.graph.edges), sorted(again.graph.edges))
+        # Two fresh builds: the shared one has been walked, which counts.
+        first, second = build_folder(REPO / "docs"), build_folder(REPO / "docs")
+        self.assertEqual(first.graph.to_json(), second.graph.to_json())
+        self.assertEqual(first.entity_confidence, second.entity_confidence)
+
+    def test_build_does_not_depend_on_the_hash_seed(self):
+        script = (
+            "import hashlib,sys;from contextmesh.ingest import build_folder;"
+            "b=build_folder(sys.argv[1]);"
+            "print(hashlib.sha256(b.graph.to_json().encode()).hexdigest(),"
+            "sorted(b.entity_confidence.items()))"
+        )
+        outputs = set()
+        for seed in ("0", "4242"):
+            env = dict(os.environ, PYTHONHASHSEED=seed)
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(REPO / "docs")],
+                cwd=REPO, env=env, capture_output=True, text=True, check=True,
+            )
+            outputs.add(result.stdout)
+        self.assertEqual(len(outputs), 1)
 
 
 class FolderSessionTest(FolderFixture):

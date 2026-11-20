@@ -31,6 +31,7 @@ from __future__ import annotations
 import bisect
 import os
 import re
+import stat
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -162,15 +163,20 @@ def iter_files(
             rel = path.relative_to(root).as_posix()
             if name.startswith(".") or path.suffix.lower() not in wanted:
                 continue
-            if path.is_symlink():
-                skipped.append(Skipped(rel, "symlink"))
-                continue
             try:
-                size = path.stat().st_size
+                info = path.lstat()
             except OSError as exc:
                 skipped.append(Skipped(rel, f"unreadable: {exc.strerror or exc}"))
                 continue
-            if size > max_bytes:
+            if stat.S_ISLNK(info.st_mode):
+                skipped.append(Skipped(rel, "symlink"))
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                # A FIFO, socket or device named *.md would block or stream
+                # forever when read.
+                skipped.append(Skipped(rel, "not a regular file"))
+                continue
+            if info.st_size > max_bytes:
                 skipped.append(Skipped(rel, f"larger than {max_bytes} bytes"))
                 continue
             if len(found) >= max_files:
@@ -182,19 +188,26 @@ def iter_files(
 
 # ── markdown, blanked in place ───────────────────────────────────────────
 _FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
-_HEADING = re.compile(r"^(\s{0,3}#{1,6})\s+(.*?)\s*#*\s*$")
+# Only the opening hashes are matched; the caller strips a closing run itself.
+# Matching the text lazily against a trailing `\s*#*\s*$` is quadratic on a
+# heading line padded with whitespace.
+_HEADING = re.compile(r"^(\s{0,3}#{1,6})(?=\s|$)")
 _SETEXT = re.compile(r"^\s{0,3}(=+|-+)\s*$")
 _LIST = re.compile(r"^(\s*(?:[-*+]|\d{1,3}[.)])\s+(?:\[[ xX]\]\s+)?)")
 _QUOTE = re.compile(r"^(\s*(?:>\s?)+)")
 _TABLE = re.compile(r"^\s*\|")
 _RULE = re.compile(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$")
 _HTML_TAG = re.compile(r"<[^>\n]{1,200}>")
-_IMAGE = re.compile(r"!\[([^\]\n]*)\]\([^)\n]*\)")
-_LINK = re.compile(r"\[([^\]\n]+)\]\([^)\n]*\)")
-_REF_LINK = re.compile(r"\[([^\]\n]+)\]\[[^\]\n]*\]")
-_WIKILINK = re.compile(r"\[\[([^\]|\n]+)(\|[^\]\n]*)?\]\]")
-_CODE_SPAN = re.compile(r"(`+)([^`\n]+?)\1")
-_EMPHASIS = re.compile(r"(?<![\w*])(\*{1,3}|_{2,3})(?=\S)(.+?)(?<=\S)\1(?![\w*])")
+# Inline patterns are bounded: unbounded, each opening marker on a long line
+# scans to the end of it, and one 200KB line of "**x " takes minutes. Real
+# emphasis, link text and code spans are far shorter than these caps; markup
+# longer than a cap is left in the text rather than parsed.
+_IMAGE = re.compile(r"!\[([^\]\n]{0,120})\]\([^)\n]{0,500}\)")
+_LINK = re.compile(r"\[([^\]\n]{1,120})\]\([^)\n]{0,500}\)")
+_REF_LINK = re.compile(r"\[([^\]\n]{1,120})\]\[[^\]\n]{0,120}\]")
+_WIKILINK = re.compile(r"\[\[([^\]|\n]{1,120})(\|[^\]\n]{0,120})?\]\]")
+_CODE_SPAN = re.compile(r"(`{1,10})([^`\n]{1,200}?)\1")
+_EMPHASIS = re.compile(r"(?<![\w*])(\*{1,3}|_{2,3})(?=\S)(.{1,120}?)(?<=\S)\1(?![\w*])")
 _LINK_DEF = re.compile(r"^\s{0,3}\[[^\]]+\]:\s+\S")
 
 
@@ -204,8 +217,16 @@ def _blank(chars: List[str], start: int, end: int) -> None:
             chars[i] = " "
 
 
+#: Lines longer than this keep their inline markup. Real prose never has one;
+#: a minified blob or generated file does, and the inline patterns cost
+#: line length times their cap.
+MAX_INLINE_LINE = 20_000
+
+
 def _blank_inline(line: str, marked: List[str]) -> str:
     """Strip inline markup from one line without changing its length."""
+    if len(line) > MAX_INLINE_LINE:
+        return line
     chars = list(line)
 
     def keep_group(pattern: re.Pattern, group: int, record: bool) -> None:
@@ -345,6 +366,51 @@ def parse_text(rel: str, raw: str, mtime: float = 0.0) -> ParsedFile:
     return ParsedFile(rel, raw, raw, blocks, title or Path(rel).stem, [], mtime)
 
 
+class _Unreadable(Exception):
+    """A file the walk admitted that turned out not to be safe to read."""
+
+
+def _read_bounded(path: Path, max_bytes: int) -> Tuple[bytes, float]:
+    """Read one regular file, never more than ``max_bytes``, never via a link.
+
+    The walk already checked all of this, but the file can change between the
+    walk and the read: swapped for a symlink, replaced by a FIFO, or grown.
+    So the checks are repeated on the open descriptor, which is the thing
+    actually read. ``O_NONBLOCK`` keeps opening a FIFO from hanging, and
+    ``O_NOFOLLOW`` makes opening a symlink fail where the OS supports it.
+    """
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise _Unreadable(f"unreadable: {exc.strerror or exc}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise _Unreadable("not a regular file")
+        chunks: List[bytes] = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1 << 16))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > max_bytes:
+            raise _Unreadable(f"larger than {max_bytes} bytes")
+        return data, info.st_mtime
+    except OSError as exc:
+        raise _Unreadable(f"unreadable: {exc.strerror or exc}") from exc
+    finally:
+        os.close(fd)
+
+
 def read_folder(
     root: Any,
     *,
@@ -363,19 +429,18 @@ def read_folder(
     for path in paths:
         rel = path.relative_to(base).as_posix()
         try:
-            data = path.read_bytes()
+            data, mtime = _read_bounded(path, max_bytes)
             raw = data.decode("utf-8-sig")
+        except _Unreadable as exc:
+            skipped.append(Skipped(rel, str(exc)))
+            continue
         except UnicodeDecodeError:
             skipped.append(Skipped(rel, "not UTF-8 text"))
-            continue
-        except OSError as exc:
-            skipped.append(Skipped(rel, f"unreadable: {exc.strerror or exc}"))
             continue
         if "\x00" in raw:
             skipped.append(Skipped(rel, "binary content"))
             continue
         raw = raw.replace("\r\n", "\n").replace("\r", "\n")
-        mtime = path.stat().st_mtime
         parse = parse_markdown if path.suffix.lower() in MARKDOWN_SUFFIXES else parse_text
         parsed = parse(rel, raw, mtime)
         if not parsed.blocks:
