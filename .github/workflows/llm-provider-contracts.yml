@@ -16,7 +16,8 @@ concurrency:
 jobs:
   contracts:
     name: llm · provider contracts · no network
-    runs-on: ubuntu-latest
+    # Python 3.9 has no build for ubuntu-latest (26.04); 24.04 still has one.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

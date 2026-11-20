@@ -53,6 +53,7 @@ from contextmesh.execute import (
     TaskRegistry,
 )
 from contextmesh.graph import ContextGraph
+from contextmesh.ingest import DEFAULT_MAX_TOTAL_BYTES, IngestError, build_folder
 from contextmesh.model import NodeType
 from contextmesh.resolve import Resolver
 from contextmesh.traverse import DEFAULT_POLICY, EdgeType, Walker
@@ -808,6 +809,26 @@ class Session:
             rounds=rounds,
         )
 
+    @classmethod
+    def from_folder(
+        cls, folder: Any, *, max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES
+    ) -> "Session":
+        """A session over a folder of the user's own Markdown and text files.
+
+        Built fresh and not persistent until saved with ``--save``; reload it
+        afterwards with ``--session``. ``rounds`` is 0 because no demo
+        question stream was walked to warm it.
+        """
+        built = build_folder(folder, max_total_bytes=max_total_bytes)
+        return cls(
+            graph=built.graph,
+            resolver=built.resolver,
+            walker=built.walker,
+            ledger=built.ledger,
+            rounds=0,
+            source=f"folder {built.root}",
+        )
+
     def manifest(self, generation: int) -> Dict[str, Any]:
         """The commit point. Names every companion this generation holds."""
         keyed = {
@@ -1263,9 +1284,28 @@ def add_source_arguments(parser: Any) -> Any:
         help="build the bundled demo corpus fresh (not persistent)",
     )
     source.add_argument(
+        "--folder",
+        metavar="DIR",
+        help=(
+            "build from your own Markdown/text files under DIR "
+            "(not persistent; add --save to keep it)"
+        ),
+    )
+    source.add_argument(
         "--session",
         metavar="DIR",
         help=f"load a session directory written by --save ({SESSION_SCHEMA} v{SESSION_VERSION})",
+    )
+    parser.add_argument(
+        "--max-total-mb",
+        type=float,
+        default=None,
+        metavar="MB",
+        help=(
+            "most text to read with --folder, in MB (default "
+            f"{DEFAULT_MAX_TOTAL_BYTES // 1_000_000}); each MB costs roughly "
+            "350 MB of memory and 15 seconds to build"
+        ),
     )
     parser.add_argument(
         "--rounds",
@@ -1293,6 +1333,8 @@ def add_source_arguments(parser: Any) -> Any:
 def open_session(
     args: Any, *, registry: Optional[TaskRegistry] = None
 ) -> Session:
+    if getattr(args, "max_total_mb", None) is not None and getattr(args, "folder", None) is None:
+        raise SessionError("--max-total-mb limits a --folder build and has no other meaning")
     if args.session is not None:
         if args.rounds is not None:
             raise SessionError(
@@ -1303,8 +1345,26 @@ def open_session(
     if getattr(args, "checkpoint", DEFAULT_CHECKPOINT) != DEFAULT_CHECKPOINT:
         raise SessionError(
             "--checkpoint decides when a served session is written back and has "
-            "no meaning for --demo, which has no directory to write to"
+            "no meaning for --demo or --folder, which have no directory to write "
+            "to; --save one first, then serve it with --session"
         )
+    if getattr(args, "folder", None) is not None:
+        if args.rounds is not None:
+            raise SessionError(
+                "--rounds builds a demo graph and has no meaning for --folder"
+            )
+        mb = getattr(args, "max_total_mb", None)
+        if mb is not None and not mb > 0:
+            raise SessionError("--max-total-mb must be more than 0")
+        try:
+            return Session.from_folder(
+                args.folder,
+                max_total_bytes=(
+                    DEFAULT_MAX_TOTAL_BYTES if mb is None else int(mb * 1_000_000)
+                ),
+            )
+        except IngestError as exc:
+            raise SessionError(str(exc)) from exc
     return Session.build(rounds=DEFAULT_ROUNDS if args.rounds is None else args.rounds)
 
 

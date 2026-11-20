@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .embed import embed
 from .graph import ContextGraph
@@ -41,6 +41,8 @@ STAGES: Tuple[Tuple[str, str], ...] = (
 )
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
+#: A sentence and its trailing whitespace, for splitting with offsets intact.
+_SENTENCE_PIECE = re.compile(r".+?(?:[.!?](?=\s)|$)\s*", re.S)
 
 # EXTRACT keeps a span only if it asserts something checkable. The test is
 # lexical and therefore explicit: this list is the extractor's contract, and a
@@ -87,6 +89,19 @@ class Document:
     entities: List[str] = field(default_factory=list)
     #: (subject mention, relation, object mention) hints the extractor honours
     relations: List[Tuple[str, str, str]] = field(default_factory=list)
+    #: Optional (start, end) blocks of ``text`` to sentence-split separately.
+    #: Empty means "the whole text is one block", which is how the bundled
+    #: corpus is built. A loader that reads real files sets these so a heading,
+    #: a list item or a paragraph never runs into the next one, and so markup
+    #: it has blanked out is never part of a claim.
+    segments: List[Tuple[int, int]] = field(default_factory=list)
+
+
+#: ``annotate(doc, start, end, sentence)`` -> extra attrs for the claim lifted
+#: from ``doc.text[start:end]``, or None. Lets a loader record where in a real
+#: file a claim sits and how much to trust the extraction, without the
+#: pipeline knowing anything about files.
+ClaimAnnotator = Callable[["Document", int, int, str], Optional[Dict[str, Any]]]
 
 
 @dataclass
@@ -144,13 +159,17 @@ class Pipeline:
         resolver: Optional[Resolver] = None,
         *,
         prune_unwalked: bool = True,
+        annotate: Optional[ClaimAnnotator] = None,
     ) -> None:
         self.graph = ContextGraph() if graph is None else graph
         self.resolver = Resolver() if resolver is None else resolver
         self.prune_unwalked = prune_unwalked
+        self.annotate = annotate
 
     # ── 01 CHUNK ─────────────────────────────────────────────────────────
     def chunk(self, doc: Document) -> List[Tuple[int, int, str]]:
+        if doc.segments:
+            return self._chunk_segments(doc)
         spans: List[Tuple[int, int, str]] = []
         cursor = 0
         for sentence in _SENTENCE.split(doc.text.strip()):
@@ -163,6 +182,25 @@ class Pipeline:
             end = start + len(sentence)
             cursor = end
             spans.append((start, end, sentence))
+        return spans
+
+    def _chunk_segments(self, doc: Document) -> List[Tuple[int, int, str]]:
+        """Sentence-split each declared block, keeping offsets into ``doc.text``.
+
+        The returned sentence has its whitespace collapsed, because a loader
+        that blanks markup in place (to keep offsets true to the file) leaves
+        runs of spaces behind; the span still points at the original bytes.
+        """
+        spans: List[Tuple[int, int, str]] = []
+        for seg_start, seg_end in doc.segments:
+            block = doc.text[seg_start:seg_end]
+            for match in _SENTENCE_PIECE.finditer(block):
+                piece = match.group(0)
+                body = piece.strip()
+                if not body:
+                    continue
+                start = seg_start + match.start() + len(piece) - len(piece.lstrip())
+                spans.append((start, start + len(body), " ".join(body.split())))
         return spans
 
     # ── the whole build ──────────────────────────────────────────────────
@@ -271,10 +309,19 @@ class Pipeline:
                 link.admitted += 2
 
         for doc, start, end, sentence, claim_id in claim_spans:
+            # A sentence repeated in a second document is the same claim seen
+            # again; its location attrs stay those of the first sighting, so
+            # they never disagree with the provenance that sighting recorded.
+            claim_attrs = (
+                self.annotate(doc, start, end, sentence)
+                if self.annotate is not None and claim_id not in graph.nodes
+                else None
+            )
             claim = graph.add_node(
                 NodeType.CLAIM,
                 sentence,
                 id=claim_id,
+                attrs=claim_attrs,
                 provenance=Provenance(
                     source_id=doc.id,
                     span=(start, end),

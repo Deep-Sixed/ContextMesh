@@ -67,6 +67,67 @@ A: dead end — entity_unresolved
    no mention resolved to a canonical entity: 'refund', 'policy', 'annual', 'plans'
 ```
 
+## Your own files
+
+Everything above runs on a small bundled corpus. To build from a folder of
+your own Markdown and text files instead:
+
+```bash
+python -m contextmesh ingest ~/notes                       # build it, report what went in
+python -m contextmesh ask --folder ~/notes "Why did we drop the old cache?"
+python -m contextmesh_mcp --folder ~/notes --save ./notes-session   # keep it
+python -m contextmesh_mcp --session ./notes-session                 # serve it over MCP
+```
+
+```
+Q: Why does an assumption only fall to evidence?
+A: An assumption is only ever rejected by evidence that contradicts it.
+   [GRAPH.md:256 · medium confidence · unverified]
+```
+
+What it does, and deliberately does not do:
+
+- **Every claim is a verbatim sentence from a file, with its location.**
+  Markup is blanked out in place, so a claim's provenance span is an exact
+  character offset into the file's decoded text, with newlines normalised to
+  `\n`. For a UTF-8 file with `\n` line endings, that is the file itself.
+  Each source records its `encoding` and original `newlines`. Claims also
+  carry `path`, `line_start`, `line_end` and `location`
+  (`docs/a.md:12-13`), which match the file whatever its encoding.
+- **Nothing extracted is marked as verified.** Each claim carries
+  `verified: false` and a `confidence` of `high` (a whole sentence from a
+  paragraph), `medium` (a list item, or a line with no closing punctuation) or
+  `low` (a heading, or a run-on over 60 words). Confidence grades how cleanly
+  the text was lifted, not whether the author was right.
+- **Entities come from the files.** A name is an entity if the author marked
+  it up (a heading, a `code span`, link text) and it appears in prose, or if
+  it is a capitalised phrase that appears in at least two files. Entity nodes
+  carry their own `confidence` for how they were found.
+- **Dates say what they rest on.** A source's `retrieved_at` (the date
+  as-of queries use) is the file's modification date. It is labelled
+  `source_time_basis: "file-modified"`, with the full `modified_at` beside
+  it, because a modification time shows when the content existed in this
+  form, not when it was written or verified. When the build ran is reported
+  as `ingested_at` but kept out of the graph, so rebuilding the same files
+  gives the same graph.
+- **No relations are invented.** `contradicts`, `supersedes`, `supports`,
+  `depends_on` and `cites` edges are interpretations, so folder ingest writes
+  none. Files connect through the entities they share.
+- **Reads only what you pointed it at.** Symlinks are not followed, hidden
+  and vendored directories (`.git`, `node_modules`, …) are skipped, and so
+  are files that are not UTF-8, over 1 MB, or past a 2,000-file limit. Each
+  skipped file is listed with the reason.
+- **Reads at most 4 MB of text per build.** The whole graph lives in memory,
+  and each MB of Markdown costs roughly 350 MB of RAM and 15 seconds to build.
+  Files are admitted in path order while they fit; the rest are listed as
+  skipped. Raise the cap with `--max-total-mb` (on `ingest`, `ask`, `health`
+  and `contextmesh_mcp`), or point it at a narrower folder.
+
+Markdown (`.md`, `.markdown`, `.mdx`) and plain text (`.txt`, `.rst`) only for
+now, as UTF-8, or as UTF-16 when the file starts with a byte-order mark (as
+Notepad and PowerShell write it). UTF-16 without a byte-order mark is skipped
+with a reason rather than guessed at. Code, PDFs and images are not read yet.
+
 ## The ontology is a file
 
 [`GRAPH.md`](GRAPH.md) is not documentation of the schema. It **is** the schema:

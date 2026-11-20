@@ -287,6 +287,7 @@ def main(
             ),
             epilog=(
                 "contextmesh-mcp --demo --rounds 8 --save ./session   write one\n"
+                "contextmesh-mcp --folder ~/notes --save ./session    or from your files\n"
                 "contextmesh-mcp --session ./session                  serve it"
             ),
             formatter_class=argparse.RawDescriptionHelpFormatter,

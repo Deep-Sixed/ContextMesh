@@ -16,7 +16,8 @@ concurrency:
 jobs:
   test:
     name: tests · python ${{ matrix.python }}
-    runs-on: ubuntu-latest
+    # Python 3.9 has no build for ubuntu-latest (26.04); 24.04 still has one.
+    runs-on: ${{ matrix.python == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -229,7 +230,8 @@ jobs:
 
   session:
     name: session · survives a restart
-    runs-on: ubuntu-latest
+    # Python 3.9 has no build for ubuntu-latest (26.04); 24.04 still has one.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -965,7 +967,8 @@ jobs:
 
   registry:
     name: registry · durable bindings
-    runs-on: ubuntu-latest
+    # Python 3.9 has no build for ubuntu-latest (26.04); 24.04 still has one.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -1158,7 +1161,8 @@ jobs:
 
   ledger:
     name: ledger · restore and continuity
-    runs-on: ubuntu-latest
+    # Python 3.9 has no build for ubuntu-latest (26.04); 24.04 still has one.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -1353,7 +1357,8 @@ jobs:
 
   execution:
     name: execution · restore and reschedule
-    runs-on: ubuntu-latest
+    # Python 3.9 has no build for ubuntu-latest (26.04); 24.04 still has one.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
