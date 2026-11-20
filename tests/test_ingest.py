@@ -108,6 +108,87 @@ class MarkdownParsingTest(unittest.TestCase):
         self.assertEqual(kinds.count("list"), 2)
 
 
+class EncodingAndTimeTest(unittest.TestCase):
+    """UTF-16 by BOM only, and source time that says what it rests on."""
+
+    WINDOWS_NOTE = "# Index Builder\r\n\r\nThe Index Builder writes shards every night.\r\n"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _source(self, built, rel):
+        return built.graph.nodes[source_id_for(rel)]
+
+    def test_utf16_with_a_bom_is_read_and_located(self):
+        (self.root / "le.md").write_bytes(b"\xff\xfe" + self.WINDOWS_NOTE.encode("utf-16-le"))
+        (self.root / "be.md").write_bytes(b"\xfe\xff" + self.WINDOWS_NOTE.encode("utf-16-be"))
+        built = build_folder(self.root)
+        self.assertEqual(sorted(f.path for f in built.files), ["be.md", "le.md"])
+        for rel, encoding in (("le.md", "utf-16-le"), ("be.md", "utf-16-be")):
+            source = self._source(built, rel)
+            self.assertEqual(source.attrs["encoding"], encoding)
+            self.assertEqual(source.attrs["newlines"], "crlf")
+        claim = next(
+            n for n in built.graph.nodes.values()
+            if n.type is NodeType.CLAIM and "writes shards" in n.label
+        )
+        self.assertEqual(claim.attrs["line_start"], 3)
+
+    def test_utf16_without_a_bom_is_skipped_with_a_fix(self):
+        (self.root / "keep.md").write_text(POLICY, encoding="utf-8")
+        (self.root / "nobom.md").write_bytes(self.WINDOWS_NOTE.encode("utf-16-le"))
+        (self.root / "wide.md").write_bytes(b"\xff\xfe\x00\x00" + "The text.".encode("utf-32-le"))
+        _, files, skipped = read_folder(self.root)
+        self.assertEqual([f.path for f in files], ["keep.md"])
+        reasons = {s.path: s.reason for s in skipped}
+        self.assertIn("UTF-16 without a byte-order mark", reasons["nobom.md"])
+        self.assertIn("UTF-32", reasons["wide.md"])
+
+    def test_the_cap_counts_bytes_on_disk_not_characters(self):
+        data = b"\xff\xfe" + POLICY.encode("utf-16-le")
+        (self.root / "a.md").write_bytes(data)
+        summary = build_folder(self.root).summary()
+        self.assertEqual(summary["bytes_read"], len(data))
+
+    def test_source_time_is_the_labelled_modification_time(self):
+        path = _write(self.root, "a.md", POLICY)
+        stamp = 1767225600  # 2026-01-01T00:00:00Z
+        os.utime(path, (stamp, stamp))
+        built = build_folder(self.root)
+        attrs = self._source(built, "a.md").attrs
+        self.assertEqual(attrs["retrieved_at"], "2026-01-01")
+        self.assertEqual(attrs["modified_at"], "2026-01-01T00:00:00Z")
+        self.assertEqual(attrs["source_time_basis"], "file-modified")
+        self.assertEqual(attrs["encoding"], "utf-8")
+        self.assertEqual(attrs["newlines"], "lf")
+
+    def test_as_of_queries_see_only_files_modified_by_then(self):
+        from contextmesh.temporal import as_of_graph
+
+        old = _write(self.root, "old.md", "The Index Builder writes shards every night.\n")
+        new = _write(self.root, "new.md", "The Index Builder now keys shards on tenant.\n")
+        os.utime(old, (1767225600, 1767225600))  # 2026-01-01
+        os.utime(new, (1780272000, 1780272000))  # 2026-06-01
+        built = build_folder(self.root)
+        march = as_of_graph(built.graph, "2026-03-01")
+        visible = sorted(
+            n.label for n in march.nodes.values() if n.type is NodeType.CLAIM and n.live
+        )
+        self.assertEqual(visible, ["The Index Builder writes shards every night."])
+
+    def test_ingestion_time_is_reported_but_not_in_the_graph(self):
+        path = _write(self.root, "a.md", POLICY)
+        os.utime(path, (1767225600, 1767225600))  # so modified_at != now
+        built = build_folder(self.root)
+        self.assertRegex(built.ingested_at, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(built.summary()["ingested_at"], built.ingested_at)
+        self.assertNotIn(built.ingested_at, built.graph.to_json())
+
+
 class PathologicalInputTest(unittest.TestCase):
     """Inputs that once made a parser regex scan quadratically, or forever."""
 

@@ -89,8 +89,11 @@ What it does, and deliberately does not do:
 
 - **Every claim is a verbatim sentence from a file, with its location.**
   Markup is blanked out in place, so a claim's provenance span is an exact
-  offset into the original file. Claims also carry `path`, `line_start`,
-  `line_end` and `location` (`docs/a.md:12-13`).
+  character offset into the file's decoded text, with newlines normalised to
+  `\n`. For a UTF-8 file with `\n` line endings, that is the file itself.
+  Each source records its `encoding` and original `newlines`. Claims also
+  carry `path`, `line_start`, `line_end` and `location`
+  (`docs/a.md:12-13`), which match the file whatever its encoding.
 - **Nothing extracted is marked as verified.** Each claim carries
   `verified: false` and a `confidence` of `high` (a whole sentence from a
   paragraph), `medium` (a list item, or a line with no closing punctuation) or
@@ -100,6 +103,13 @@ What it does, and deliberately does not do:
   it up (a heading, a `code span`, link text) and it appears in prose, or if
   it is a capitalised phrase that appears in at least two files. Entity nodes
   carry their own `confidence` for how they were found.
+- **Dates say what they rest on.** A source's `retrieved_at` (the date
+  as-of queries use) is the file's modification date. It is labelled
+  `source_time_basis: "file-modified"`, with the full `modified_at` beside
+  it, because a modification time shows when the content existed in this
+  form, not when it was written or verified. When the build ran is reported
+  as `ingested_at` but kept out of the graph, so rebuilding the same files
+  gives the same graph.
 - **No relations are invented.** `contradicts`, `supersedes`, `supports`,
   `depends_on` and `cites` edges are interpretations, so folder ingest writes
   none. Files connect through the entities they share.
@@ -114,7 +124,9 @@ What it does, and deliberately does not do:
   and `contextmesh_mcp`), or point it at a narrower folder.
 
 Markdown (`.md`, `.markdown`, `.mdx`) and plain text (`.txt`, `.rst`) only for
-now. Code, PDFs and images are not read yet.
+now, as UTF-8, or as UTF-16 when the file starts with a byte-order mark (as
+Notepad and PowerShell write it). UTF-16 without a byte-order mark is skipped
+with a reason rather than guessed at. Code, PDFs and images are not read yet.
 
 ## The ontology is a file
 

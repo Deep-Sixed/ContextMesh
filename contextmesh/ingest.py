@@ -9,10 +9,13 @@ is allowed to invent one.
 Two rules hold for everything it writes:
 
 * **Every claim is a verbatim span of a file, and says where.** The text the
-  pipeline reads is the file with its markup blanked out *in place*, so a
-  claim's provenance span is a byte-for-byte offset into the original file.
-  Each claim also carries ``path``, ``line_start``, ``line_end`` and
-  ``location`` (``docs/a.md:12-13``).
+  pipeline reads is the file's decoded text with its markup blanked out *in
+  place*, so a claim's provenance span is a character offset into that text
+  (newlines normalised to ``\\n``; the source records its ``encoding`` and
+  original ``newlines``). For a UTF-8 file with ``\\n`` line endings that is
+  the file itself. Each claim also carries ``path``, ``line_start``,
+  ``line_end`` and ``location`` (``docs/a.md:12-13``), which match the file
+  whatever its encoding.
 * **Nothing extracted is presented as verified.** Each claim carries
   ``verified: False``, ``extraction: "verbatim-rule"`` and a ``confidence`` of
   ``high``, ``medium`` or ``low``. Confidence grades how cleanly the span was
@@ -21,7 +24,16 @@ Two rules hold for everything it writes:
   they were found: marked up explicitly by the author, or inferred from
   capitalisation.
 
-Phase 1 reads Markdown and plain text only, with no new dependencies. It does
+A source's ``retrieved_at`` (temporal.py's *source time*) is the file's
+modification date, labelled ``source_time_basis: "file-modified"`` with the
+full ``modified_at`` beside it: the best evidence a folder offers of when its
+content existed, and not a claim about when it was written or verified. When
+the build read the folder is ``FolderBuild.ingested_at``, reported but kept
+out of the graph so a rebuild of the same files is identical; inside the
+graph, processing time is the build counter.
+
+Phase 1 reads Markdown and plain text only, with no new dependencies. Text is
+UTF-8 by default; UTF-16 is read when a byte-order mark declares it. It does
 not follow symlinks out of the folder, and it skips hidden, vendored and build
 directories. A build reads at most ``DEFAULT_MAX_TOTAL_BYTES`` of text in all
 (4 MB unless raised), because the whole graph lives in memory; files past the
@@ -95,6 +107,9 @@ class ParsedFile:
     title: str
     marked: List[str]  # names the author marked up: headings, code, links
     mtime: float
+    encoding: str = "utf-8"
+    newlines: str = "lf"  # lf | crlf | cr | mixed, before normalising to \n
+    size_bytes: int = 0  # on disk, as read
 
     def __post_init__(self) -> None:
         self._line_starts = [0] + [m.end() for m in re.finditer("\n", self.raw)]
@@ -125,6 +140,10 @@ class FolderBuild:
     skipped: List[Skipped] = field(default_factory=list)
     entity_confidence: Dict[str, str] = field(default_factory=dict)
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES
+    #: Wall-clock time this build read the folder. Reported, never written
+    #: into the graph: temporal.py keeps the graph free of wall-clock time so a
+    #: rebuild is reproducible, and processing time there is the build counter.
+    ingested_at: str = ""
 
     def summary(self) -> Dict[str, Any]:
         live = [n for n in self.graph.nodes.values() if n.live]
@@ -136,9 +155,10 @@ class FolderBuild:
         )
         return {
             "root": str(self.root),
+            "ingested_at": self.ingested_at,
             "files_read": len(self.files),
             "files_skipped": len(self.skipped),
-            "bytes_read": sum(len(f.raw.encode("utf-8")) for f in self.files),
+            "bytes_read": sum(f.size_bytes for f in self.files),
             "max_total_bytes": self.max_total_bytes,
             "nodes_live": len(live),
             "edges_live": sum(1 for e in self.graph.edges.values() if e.live),
@@ -391,6 +411,69 @@ def total_limit_reason(max_total_bytes: int) -> str:
     return f"over the {max_total_bytes:,}-byte total limit"
 
 
+_BOMS = (
+    # UTF-32 first: its little-endian BOM begins with UTF-16's.
+    (b"\xff\xfe\x00\x00", None, "UTF-32"),
+    (b"\x00\x00\xfe\xff", None, "UTF-32"),
+    (b"\xef\xbb\xbf", "utf-8-sig", "utf-8 (BOM)"),
+    (b"\xff\xfe", "utf-16-le", "utf-16-le"),
+    (b"\xfe\xff", "utf-16-be", "utf-16-be"),
+)
+
+
+def decode_text(data: bytes) -> Tuple[str, str]:
+    """``(text, encoding label)`` for a file's bytes, or raise ``_Unreadable``.
+
+    UTF-8 is the default. UTF-16 is accepted only when a byte-order mark says
+    so: that is the one signal that is reliable, and it is what Windows tools
+    that save UTF-16 (Notepad, PowerShell's ``Out-File``) write. A file that
+    looks like UTF-16 but has no BOM is skipped with a reason that says how to
+    fix it, rather than guessed at.
+    """
+    for bom, codec, label in _BOMS:
+        if data.startswith(bom):
+            if codec is None:
+                raise _Unreadable(f"{label} text is not supported; save it as UTF-8")
+            try:
+                return data.decode(codec), label
+            except UnicodeDecodeError as exc:
+                raise _Unreadable(f"declares {label} but does not decode as it") from exc
+    bomless_utf16 = (
+        "looks like UTF-16 without a byte-order mark; save it as UTF-8 "
+        "or as UTF-16 with a BOM"
+    )
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if _looks_like_bomless_utf16(data):
+            raise _Unreadable(bomless_utf16) from exc
+        raise _Unreadable("not UTF-8 text") from exc
+    # NUL is valid UTF-8, so mostly-ASCII UTF-16 decodes "successfully".
+    if "\x00" in text:
+        raise _Unreadable(bomless_utf16 if _looks_like_bomless_utf16(data) else "binary content")
+    return text, "utf-8"
+
+
+def _looks_like_bomless_utf16(data: bytes) -> bool:
+    """Mostly-ASCII UTF-16 has a NUL in every other byte. Used only to word
+    the skip reason; such a file is never decoded on this guess."""
+    sample = data[:4096]
+    if len(sample) < 16:
+        return False
+    even, odd = sample[0::2], sample[1::2]
+    return max(even.count(0) / len(even), odd.count(0) / len(odd)) > 0.4
+
+
+def _newline_style(text: str) -> str:
+    crlf = text.count("\r\n")
+    cr = text.count("\r") - crlf
+    lf = text.count("\n") - crlf
+    styles = [name for name, n in (("crlf", crlf), ("cr", cr), ("lf", lf)) if n]
+    if not styles:
+        return "lf"
+    return styles[0] if len(styles) == 1 else "mixed"
+
+
 class _Unreadable(Exception):
     """A file the walk admitted that turned out not to be safe to read."""
 
@@ -462,24 +545,20 @@ def read_folder(
         rel = path.relative_to(base).as_posix()
         try:
             data, mtime = _read_bounded(path, max_bytes)
-            raw = data.decode("utf-8-sig")
+            raw, encoding = decode_text(data)
         except _Unreadable as exc:
             skipped.append(Skipped(rel, str(exc)))
-            continue
-        except UnicodeDecodeError:
-            skipped.append(Skipped(rel, "not UTF-8 text"))
             continue
         # The walk budgeted by size on disk; a file can grow before it is read.
         if total + len(data) > max_total_bytes:
             skipped.append(Skipped(rel, total_limit_reason(max_total_bytes)))
             continue
         total += len(data)
-        if "\x00" in raw:
-            skipped.append(Skipped(rel, "binary content"))
-            continue
+        newlines = _newline_style(raw)
         raw = raw.replace("\r\n", "\n").replace("\r", "\n")
         parse = parse_markdown if path.suffix.lower() in MARKDOWN_SUFFIXES else parse_text
         parsed = parse(rel, raw, mtime)
+        parsed.encoding, parsed.newlines, parsed.size_bytes = encoding, newlines, len(data)
         if not parsed.blocks:
             skipped.append(Skipped(rel, "no prose"))
             continue
@@ -670,6 +749,15 @@ def documents_from(
     return docs
 
 
+def _utc_iso(timestamp: float) -> str:
+    return (
+        datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
 def build_folder(
     root: Any,
     *,
@@ -681,6 +769,7 @@ def build_folder(
     hop_budget: int = 6,
 ) -> FolderBuild:
     """Read ``root``, discover its entities, and build a walkable graph."""
+    ingested_at = _utc_iso(datetime.now(timezone.utc).timestamp())
     base, files, skipped = read_folder(
         root, suffixes=suffixes, max_files=max_files, max_bytes=max_bytes,
         max_total_bytes=max_total_bytes,
@@ -712,6 +801,25 @@ def build_folder(
             node.attrs["confidence"] = conf
             node.attrs["extraction"] = "marked-up" if conf == HIGH else "capitalised-phrase"
 
+    # Say what each source's date and offsets actually rest on.
+    for doc, parsed in zip(docs, files):
+        node = graph.nodes.get(doc.id)
+        if node is None:
+            continue
+        node.attrs.update({
+            # retrieved_at is temporal.py's *source time*. For a file the best
+            # evidence of when its content existed is when it was last
+            # modified, so that is what it holds — labelled as such, because a
+            # modification time does not show when the content was written,
+            # checked or verified.
+            "source_time_basis": "file-modified",
+            "modified_at": _utc_iso(parsed.mtime),
+            "encoding": parsed.encoding,
+            "newlines": parsed.newlines,
+            # Claim spans index this text, not the raw bytes.
+            "span_basis": "characters of the decoded text, newlines normalised to \\n",
+        })
+
     walker = Walker(graph, resolver, hop_budget=hop_budget)
     return FolderBuild(
         root=base,
@@ -725,4 +833,5 @@ def build_folder(
         skipped=skipped,
         entity_confidence=entity_confidence,
         max_total_bytes=max_total_bytes,
+        ingested_at=ingested_at,
     )

@@ -206,6 +206,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         builtins.print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
     _h(f"INGEST {summary['root']}")
+    print(f"  ingested at    {summary['ingested_at']}  (wall clock; not stored in the graph)")
     print(f"  files read     {summary['files_read']}")
     print(f"  files skipped  {summary['files_skipped']}")
     for item in built.skipped[:10]:
