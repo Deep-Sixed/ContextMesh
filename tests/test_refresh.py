@@ -281,6 +281,157 @@ class RestoreTest(RefreshFixture):
         self.assertNotIn("replaced_at_build", original.attrs)
 
 
+class EntityRediscoveryTest(unittest.TestCase):
+    """Phase 2, slice 3: a name that starts to qualify reaches unchanged files."""
+
+    # "Retention Window" is capitalised mid-sentence in one file only, so a
+    # full build does not make it an entity; it needs a second file.
+    POLICY = "# Policy\n\nShards follow the Retention Window set by audit.\n"
+    NEWS = "# News\n\nAudit shortened the Retention Window this quarter.\n"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "notes"
+        write(self.root, "policy.md", self.POLICY)
+        write(self.root, "cache.md", CACHE)
+        self.built = build_folder(self.root)
+        self.graph = self.built.graph
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def refresh(self, **kwargs):
+        return refresh_folder(
+            self.graph, self.built.resolver, self.built.ledger, self.root, **kwargs
+        )
+
+    def entity(self, graph, label):
+        found = [
+            n for n in graph.nodes.values()
+            if n.type is NodeType.ENTITY and n.label.lower() == label.lower()
+        ]
+        return found[0] if found else None
+
+    def mentions(self, graph):
+        """(path, claim sentence, entity) for every live claim's mentions."""
+        out = set()
+        for node in graph.nodes.values():
+            if node.type is NodeType.CLAIM and node.live:
+                for edge in graph.out_edges(node.id, [EdgeType.MENTIONS]):
+                    out.add((node.attrs["path"], node.label, graph.nodes[edge.dst].label))
+        return out
+
+    def test_a_newly_qualifying_name_is_linked_into_unchanged_files(self):
+        self.assertIsNone(self.entity(self.graph, "Retention Window"))
+        write(self.root, "news.md", self.NEWS)
+        report = self.refresh()
+        entity = self.entity(self.graph, "Retention Window")
+        self.assertIsNotNone(entity)
+        self.assertIn(entity.id, report.entities_added)
+        self.assertGreater(report.entity_links_added, 0)
+        self.assertTrue(entity.live)
+        self.assertIsNotNone(entity.embedding)
+
+        policy_claim = next(
+            n for n in self.graph.nodes.values()
+            if n.type is NodeType.CLAIM and n.attrs.get("path") == "policy.md"
+        )
+        mentioned = [e.dst for e in self.graph.out_edges(policy_claim.id, [EdgeType.MENTIONS])]
+        self.assertIn(entity.id, mentioned)
+        policy_source = next(
+            n for n in self.graph.nodes.values()
+            if n.type is NodeType.SOURCE and n.attrs.get("path") == "policy.md"
+        )
+        self.assertIn(
+            entity.id,
+            [e.dst for e in self.graph.out_edges(policy_source.id, [EdgeType.MENTIONS])],
+        )
+        self.assertIn(
+            policy_source.id,
+            [e.dst for e in self.graph.out_edges(entity.id, [EdgeType.DERIVED_FROM])],
+        )
+
+    def test_the_unchanged_file_now_answers_through_the_new_entity(self):
+        write(self.root, "news.md", self.NEWS)
+        self.refresh()
+        walker = self.built.walker
+        walk = walker.ask("What do shards follow under the Retention Window?")
+        self.assertTrue(walk.resolved, walk.detail)
+
+    def test_mentions_match_a_fresh_build(self):
+        write(self.root, "news.md", self.NEWS)
+        self.refresh()
+        fresh = build_folder(self.root).graph
+        self.assertEqual(self.mentions(self.graph), self.mentions(fresh))
+
+    def edge_weights_at(self, graph, entity_label):
+        """(src, type, dst) -> weight for every live edge touching an entity,
+        with nodes named by path/label so two graphs can be compared."""
+        def name(node):
+            if node.type is NodeType.SOURCE:
+                return ("source", node.attrs["path"])
+            if node.type is NodeType.CLAIM:
+                return ("claim", node.attrs["path"], node.label)
+            return (node.type.value, node.label.lower())
+
+        entity = self.entity(graph, entity_label)
+        out = {}
+        for edge in graph.edges.values():
+            if edge.live and entity.id in (edge.src, edge.dst):
+                key = (name(graph.nodes[edge.src]), edge.type.value, name(graph.nodes[edge.dst]))
+                out[key] = edge.weight
+        return out
+
+    def test_edges_to_a_new_entity_weigh_what_a_fresh_build_gives_them(self):
+        # LINK weights an edge by how often it is mentioned; relinking must
+        # repeat those calls, not de-duplicate them, or walks over a refreshed
+        # graph would cost differently from walks over a fresh build.
+        write(self.root, "news.md", self.NEWS)
+        self.refresh()
+        fresh = build_folder(self.root).graph
+        self.assertEqual(
+            self.edge_weights_at(self.graph, "Retention Window"),
+            self.edge_weights_at(fresh, "Retention Window"),
+        )
+
+    def test_relinking_adds_no_weight_to_edges_that_already_existed(self):
+        weights = {eid: e.weight for eid, e in self.graph.edges.items()}
+        write(self.root, "news.md", self.NEWS)
+        self.refresh()
+        for eid, weight in weights.items():
+            self.assertEqual(self.graph.edges[eid].weight, weight, eid)
+
+    def test_a_deletion_only_refresh_still_registers_and_links(self):
+        # With room for few entities, deleting the file whose names ranked
+        # highest lets a lower-ranked name in, with nothing to re-extract.
+        for name in ("a.md", "b.md", "c.md"):
+            write(self.root, name, "")
+        (self.root / "cache.md").unlink()
+        heavy = "# Heavy\n\n" + "The Index Builder and the Shard Store run the Rebuild.\n" * 3
+        write(self.root, "heavy.md", heavy)
+        write(self.root, "also.md", "The Index Builder and the Shard Store run the Rebuild.\n")
+        write(self.root, "news.md", self.NEWS)
+        built = build_folder(self.root, max_entities=3)
+        graph = built.graph
+        self.assertIsNone(self.entity(graph, "Retention Window"))
+        for name in ("heavy.md", "also.md"):
+            (self.root / name).unlink()
+        report = refresh_folder(
+            graph, built.resolver, built.ledger, self.root, max_entities=3
+        )
+        self.assertEqual(report.files["changed"] + report.files["added"], [])
+        entity = self.entity(graph, "Retention Window")
+        self.assertIsNotNone(entity)
+        self.assertTrue(entity.live)
+        self.assertGreater(report.entity_links_added, 0)
+
+    def test_a_dry_run_names_the_entities_it_would_add(self):
+        write(self.root, "news.md", self.NEWS)
+        dry = self.refresh(dry_run=True)
+        real = self.refresh()
+        self.assertEqual(dry.entities_added, real.entities_added)
+
+
 class DryRunTest(RefreshFixture):
     def test_a_dry_run_changes_nothing_and_predicts_the_real_run(self):
         self.decide_on(self.claim("a.md", "The cache is keyed per tenant."), "Shard by tenant")

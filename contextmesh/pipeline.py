@@ -190,6 +190,25 @@ class Pipeline:
         self.prune_unwalked = prune_unwalked
         self.annotate = annotate
 
+    def register_entities(self, docs: Sequence[Document]) -> None:
+        """Seed the resolver with the entities each document declares.
+
+        A name that already resolves to a known entity is registered as an
+        alias of it — otherwise "PG Vector" would quietly become a second
+        pgvector. Idempotent, so a refresh can seed from every current file
+        before building only the changed ones.
+        """
+        for doc in docs:
+            for name in doc.entities:
+                existing = self.resolver.match(name)
+                if existing is not None:
+                    entity_id = existing[0]
+                    self.resolver.register(
+                        entity_id, self.resolver.canonical[entity_id], aliases=[name]
+                    )
+                    continue
+                self.resolver.register(slug(name, NodeType.ENTITY.value), name)
+
     # ── 01 CHUNK ─────────────────────────────────────────────────────────
     def chunk(self, doc: Document) -> List[Tuple[int, int, str]]:
         if doc.segments:
@@ -243,19 +262,7 @@ class Pipeline:
         embed_stage = report.stage("EMBED")
         prune = report.stage("PRUNE")
 
-        # Seed the resolver with the entities each document declares. A name
-        # that already resolves to a known entity is registered as an alias of
-        # it — otherwise "PG Vector" would quietly become a second pgvector.
-        for doc in docs:
-            for name in doc.entities:
-                existing = self.resolver.match(name)
-                if existing is not None:
-                    entity_id = existing[0]
-                    self.resolver.register(
-                        entity_id, self.resolver.canonical[entity_id], aliases=[name]
-                    )
-                    continue
-                self.resolver.register(slug(name, NodeType.ENTITY.value), name)
+        self.register_entities(docs)
 
         claim_spans: List[Tuple[Document, int, int, str, str]] = []
 

@@ -1,10 +1,10 @@
 # Phase 2 — Incremental folder rebuilds
 
-Status: **design approved; slices 1 and 2 implemented.** Slice 2 also took the
+Status: **design approved; slices 1–3 implemented.** Slice 2 also took the
 restore (`supersedes`) and location-update parts of slice 3, because a refresh
 without them would reattach a returning sentence to its dead claim and leave
-kept claims pointing at stale lines. Remaining: entity re-discovery across
-unchanged files (slice 3) and the property and persistence tests (slice 4).
+kept claims pointing at stale lines. Remaining: the property and persistence
+tests (slice 4).
 
 Phase 1 (PR #48) builds a graph from a folder in one pass. Every change to the
 folder means rebuilding from scratch, at roughly 15 seconds per MB of text, and
@@ -115,6 +115,16 @@ Parsing is cheap; it's resolution and embedding that cost.
 - **Newly qualifying names** are registered and linked to every live claim that
   mentions them, including claims in unchanged files. `mentions` edges never
   propagate invalidation, so this is safe.
+  - *As built (slice 3):* registration runs over every current file before the
+    build, and the build always runs, so a deletion-only refresh still creates
+    and embeds new entity nodes. Relinking makes the same `add_edge` calls a
+    full build's LINK stage makes, including the repeats that weight an edge by
+    how often it is mentioned. So edges to a new entity weigh exactly what a
+    fresh build gives them, and a test compares the two. Only edges ending at a
+    new entity are created; nothing that existed before the refresh changes.
+  - Relinking only calls the resolver for phrases that share an alias or a
+    lookup block with a new entity. That is exact, because `Resolver.match`
+    can't reach an entity any other way.
 - **Names that stop qualifying are kept.** An entity is not asserted by any one
   file, so nothing contradicts it. Once only dead claims mention it, the walker
   already refuses dead edges, and graph health reports it.
@@ -249,7 +259,21 @@ is settled: one assumption per claim.
 
 A refresh after a small edit should cost roughly what building the changed
 files from scratch costs, plus a re-read and hash of every file, which is
-cheap. The benchmark slice (Phase 2, item 3) measures it.
+cheap. The benchmark slice (Phase 2, item 3) measures it properly.
+
+**Measured (slice 3)**, on the same 4 MB folder:
+
+| | Time |
+|---|---|
+| Full build | ~41 s |
+| Refresh adding one small file, no new entity | ~1.6 s |
+| Refresh adding one small file that introduces a new entity | ~9 s |
+
+With a new entity, nearly all the time is relinking: about 1.4 million
+candidate phrases across 34,000 claims, each needing its lookup keys. The
+resolver itself is no longer called for them (see above). Indexing claims by
+lookup key would remove most of the rest. That is a possible follow-up, not
+needed for correctness.
 
 ## Verification
 

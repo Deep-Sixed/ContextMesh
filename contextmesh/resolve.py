@@ -61,6 +61,23 @@ def acronym(text: str) -> str:
     return "".join(p[0] for p in parts) if len(parts) > 1 else ""
 
 
+@lru_cache(maxsize=65536)
+def block_keys(name: str) -> Tuple[str, ...]:
+    """The blocks a name is filed under; a mention is only ever compared with
+    entities sharing one. Pure, so cached like ``normalise``."""
+    norm = normalise(name)
+    if not norm:
+        return ()
+    toks = norm.split()
+    keys = {toks[0][:4], toks[-1][:4]}
+    acr = acronym(name)
+    if acr:
+        keys.add(acr[:4])
+    if len(norm) >= 4:
+        keys.add(norm.replace(" ", "")[:4])
+    return tuple(keys)
+
+
 def _token_set(text: str) -> Set[str]:
     return set(normalise(text).split())
 
@@ -238,17 +255,7 @@ class Resolver:
                 self.blocks.setdefault(block, set()).add(entity_id)
 
     def _block_keys(self, name: str) -> Sequence[str]:
-        norm = normalise(name)
-        if not norm:
-            return ()
-        toks = norm.split()
-        keys = {toks[0][:4], toks[-1][:4]}
-        acr = acronym(name)
-        if acr:
-            keys.add(acr[:4])
-        if len(norm) >= 4:
-            keys.add(norm.replace(" ", "")[:4])
-        return tuple(keys)
+        return block_keys(name)
 
     # ── resolution ───────────────────────────────────────────────────────
     def match(self, mention: str) -> Optional[Tuple[str, float, str]]:
