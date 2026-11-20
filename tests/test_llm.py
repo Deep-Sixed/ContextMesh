@@ -833,6 +833,19 @@ class WorkerTest(unittest.TestCase):
             make_worker(client, "Do work.", schema)
 
 
+def _drain_body(handler: BaseHTTPRequestHandler) -> None:
+    """Read the request body before replying.
+
+    A handler that closes its socket with the body still unread makes Windows
+    send RST instead of FIN, which can abort the connection before the client
+    has read the response (WinError 10053) -- an intermittent failure on
+    Windows only, unrelated to what the test checks.
+    """
+    length = int(handler.headers.get("Content-Length") or 0)
+    if length:
+        handler.rfile.read(length)
+
+
 class RedirectRefusalTest(unittest.TestCase):
     """PR #12: a provider request never follows a redirect.
 
@@ -866,6 +879,7 @@ class RedirectRefusalTest(unittest.TestCase):
 
         class Sink(BaseHTTPRequestHandler):
             def respond(self):
+                _drain_body(self)
                 received.append({k.lower(): v for k, v in self.headers.items()})
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -882,6 +896,7 @@ class RedirectRefusalTest(unittest.TestCase):
     def redirector(self, code, location):
         class Redirect(BaseHTTPRequestHandler):
             def do_POST(self):
+                _drain_body(self)
                 self.send_response(code)
                 self.send_header("Location", location)
                 self.end_headers()
@@ -945,6 +960,7 @@ class RedirectRefusalTest(unittest.TestCase):
 
         class Oversized(BaseHTTPRequestHandler):
             def do_POST(self):
+                _drain_body(self)
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
