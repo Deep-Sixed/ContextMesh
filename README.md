@@ -107,6 +107,11 @@ What it does, and deliberately does not do:
   and vendored directories (`.git`, `node_modules`, …) are skipped, and so
   are files that are not UTF-8, over 1 MB, or past a 2,000-file limit. Each
   skipped file is listed with the reason.
+- **Reads at most 4 MB of text per build.** The whole graph lives in memory,
+  and each MB of Markdown costs roughly 350 MB of RAM and 15 seconds to build.
+  Files are admitted in path order while they fit; the rest are listed as
+  skipped. Raise the cap with `--max-total-mb` (on `ingest`, `ask`, `health`
+  and `contextmesh_mcp`), or point it at a narrower folder.
 
 Markdown (`.md`, `.markdown`, `.mdx`) and plain text (`.txt`, `.rst`) only for
 now. Code, PDFs and images are not read yet.

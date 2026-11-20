@@ -7,11 +7,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 from pathlib import Path
 
 from contextmesh import cli
 from contextmesh.ingest import (
+    DEFAULT_MAX_TOTAL_BYTES,
     HIGH,
     LOW,
     MEDIUM,
@@ -304,6 +306,54 @@ class FolderSafetyTest(unittest.TestCase):
         self.assertEqual(len(skipped), 1)
         self.assertIn("limit", skipped[0].reason)
 
+    def test_total_size_cap_admits_what_fits_in_path_order(self):
+        # Three 100-byte files and a tiny one; a 250-byte cap admits a and b,
+        # skips c, and still admits d, which fits in what is left.
+        for name in ("a.md", "b.md", "c.md"):
+            _write(self.root, name, ("The Index Builder runs. " * 5)[:99] + "\n")
+        _write(self.root, "d.md", "Tiny note here.\n")
+        _, files, skipped = read_folder(self.root, max_total_bytes=250)
+        self.assertEqual([f.path for f in files], ["a.md", "b.md", "d.md"])
+        self.assertEqual([s.path for s in skipped], ["c.md"])
+        for item in skipped:
+            self.assertEqual(item.reason, "over the 250-byte total limit")
+
+    def test_total_size_cap_counts_bytes_actually_read(self):
+        # The walk budgets by size on disk; a file that grew before the read
+        # must still not take the total past the cap.
+        from contextmesh import ingest
+
+        _write(self.root, "a.md", "The Index Builder runs every night.\n")
+        _write(self.root, "b.md", "The Retention Policy keeps shards.\n")
+        real = ingest._read_bounded
+
+        def grown(path, max_bytes):
+            data, mtime = real(path, max_bytes)
+            return (data * 10 if path.name == "a.md" else data), mtime
+
+        ingest._read_bounded = grown
+        try:
+            _, files, skipped = read_folder(self.root, max_total_bytes=200)
+        finally:
+            ingest._read_bounded = real
+        self.assertEqual([f.path for f in files], ["b.md"])
+        self.assertEqual([s.path for s in skipped], ["a.md"])
+        self.assertIn("total limit", skipped[0].reason)
+
+    def test_a_cap_smaller_than_the_first_file_is_explained(self):
+        _write(self.root, "a.md", POLICY)
+        with self.assertRaises(IngestError) as caught:
+            build_folder(self.root, max_total_bytes=10)
+        self.assertIn("total limit", str(caught.exception))
+        with self.assertRaises(IngestError):
+            build_folder(self.root, max_total_bytes=0)
+
+    def test_the_default_cap_is_reported(self):
+        _write(self.root, "a.md", POLICY)
+        summary = build_folder(self.root).summary()
+        self.assertEqual(summary["max_total_bytes"], DEFAULT_MAX_TOTAL_BYTES)
+        self.assertEqual(summary["bytes_read"], len(POLICY.encode("utf-8")))
+
 
 class RealRepositoryTest(unittest.TestCase):
     """The repository's own docs, not a synthetic corpus."""
@@ -383,6 +433,16 @@ class FolderSessionTest(FolderFixture):
             open_session(parser.parse_args(["--folder", str(self.root), "--rounds", "3"]))
         with self.assertRaises(SessionError):
             open_session(parser.parse_args(["--folder", str(self.root / "missing")]))
+        with self.assertRaises(SessionError):
+            open_session(parser.parse_args(["--demo", "--max-total-mb", "2"]))
+        with self.assertRaises(SessionError):
+            open_session(parser.parse_args(["--folder", str(self.root), "--max-total-mb", "0"]))
+
+        capped = open_session(
+            parser.parse_args(["--folder", str(self.root), "--max-total-mb", "0.0003"])
+        )
+        sources = [n for n in capped.graph.nodes.values() if n.type is NodeType.SOURCE]
+        self.assertEqual(len(sources), 1)
 
 
 class FolderCliTest(FolderFixture):
@@ -399,6 +459,18 @@ class FolderCliTest(FolderFixture):
         self.assertEqual(summary["files_read"], 2)
         self.assertEqual(summary["skipped"], [])
         self.assertGreater(summary["claim_confidence"]["high"], 0)
+
+    def test_ingest_reports_files_left_out_by_the_cap(self):
+        code, out = self.run_cli("ingest", str(self.root), "--max-total-mb", "0.0003")
+        self.assertEqual(code, 0)
+        self.assertIn("over the 300-byte total limit", out)
+        self.assertIn("--max-total-mb", out)
+
+    def test_cap_flag_rejects_nonsense(self):
+        for bad in ("0", "-1", "lots"):
+            with self.assertRaises(SystemExit), redirect_stdout(io.StringIO()):
+                with unittest.mock.patch("sys.stderr", io.StringIO()):
+                    cli.main(["ingest", str(self.root), "--max-total-mb", bad])
 
     def test_ask_prints_where_the_answer_is(self):
         code, out = self.run_cli(

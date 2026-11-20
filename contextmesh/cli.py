@@ -161,9 +161,26 @@ def _source_graph(args: argparse.Namespace) -> Any:
     from .ingest import IngestError, build_folder
 
     try:
-        return build_folder(folder)
+        return build_folder(folder, max_total_bytes=_total_bytes(args))
     except IngestError as exc:
         raise SystemExit(f"contextmesh: {exc}") from exc
+
+
+def _total_bytes(args: argparse.Namespace) -> int:
+    from .ingest import DEFAULT_MAX_TOTAL_BYTES
+
+    mb = getattr(args, "max_total_mb", None)
+    return DEFAULT_MAX_TOTAL_BYTES if mb is None else int(mb * 1_000_000)
+
+
+def _megabytes(value: str) -> float:
+    try:
+        mb = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number of megabytes")
+    if not mb > 0:
+        raise argparse.ArgumentTypeError("the total size limit must be more than 0 MB")
+    return mb
 
 
 def _where(node: Any) -> str:
@@ -179,7 +196,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     from .ingest import IngestError, build_folder
 
     try:
-        built = build_folder(args.folder)
+        built = build_folder(args.folder, max_total_bytes=_total_bytes(args))
     except IngestError as exc:
         print(f"contextmesh: {exc}", file=sys.stderr)
         return 2
@@ -193,6 +210,19 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     print(f"  files skipped  {summary['files_skipped']}")
     for item in built.skipped[:10]:
         print(f"                 · {item.path}: {item.reason}")
+    if len(built.skipped) > 10:
+        print(f"                 · … and {len(built.skipped) - 10} more (--json lists all)")
+    print(f"  text read      {summary['bytes_read'] / 1e6:.1f} MB of a "
+          f"{summary['max_total_bytes'] / 1e6:g} MB limit")
+    from .ingest import total_limit_reason
+
+    capped = sum(
+        1 for s in built.skipped if s.reason == total_limit_reason(built.max_total_bytes)
+    )
+    if capped:
+        print(f"  ! {capped} files were left out to stay under the total size limit."
+              " Point it at a narrower folder, or raise the limit with --max-total-mb"
+              " (each MB costs roughly 350 MB of memory and 15 seconds).")
     print(f"  nodes live     {_fmt(summary['nodes_live'])}  {summary['by_type']}")
     print(f"  edges live     {_fmt(summary['edges_live'])}")
     conf = summary["claim_confidence"]
@@ -405,16 +435,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         func=cmd_demo
     )
     folder_help = "build from Markdown/text files under DIR instead of the demo"
+    cap_help = (
+        "most text to read from --folder, in MB (default 4); each MB costs "
+        "roughly 350 MB of memory and 15 seconds to build"
+    )
     ask = sub.add_parser("ask", help="ask the graph a question")
     ask.add_argument("question", nargs="+")
     ask.add_argument("--folder", metavar="DIR", help=folder_help)
+    ask.add_argument("--max-total-mb", type=_megabytes, metavar="MB", help=cap_help)
     ask.set_defaults(func=cmd_ask)
     health = sub.add_parser("health", help="graph health signals")
     health.add_argument("--folder", metavar="DIR", help=folder_help)
+    health.add_argument("--max-total-mb", type=_megabytes, metavar="MB", help=cap_help)
     health.set_defaults(func=cmd_health)
     ingest = sub.add_parser("ingest", help="build a graph from your own files and report it")
     ingest.add_argument("folder", metavar="DIR")
     ingest.add_argument("--json", action="store_true", help="machine-readable summary")
+    ingest.add_argument(
+        "--max-total-mb", type=_megabytes, metavar="MB",
+        help=cap_help.replace("from --folder", "from DIR"),
+    )
     ingest.set_defaults(func=cmd_ingest)
     sub.add_parser(
         "invalidate", help="reject an assumption and show the blast radius"

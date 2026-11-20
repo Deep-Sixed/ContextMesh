@@ -23,7 +23,9 @@ Two rules hold for everything it writes:
 
 Phase 1 reads Markdown and plain text only, with no new dependencies. It does
 not follow symlinks out of the folder, and it skips hidden, vendored and build
-directories.
+directories. A build reads at most ``DEFAULT_MAX_TOTAL_BYTES`` of text in all
+(4 MB unless raised), because the whole graph lives in memory; files past the
+cap are skipped and reported, never silently dropped.
 """
 
 from __future__ import annotations
@@ -57,6 +59,11 @@ SKIP_DIRS = frozenset({
 
 DEFAULT_MAX_FILES = 2000
 DEFAULT_MAX_BYTES = 1_000_000
+#: The most text one build reads, across all files. A build holds the whole
+#: graph in memory, and measured cost is roughly 350 MB of RAM and 15 seconds
+#: per MB of Markdown (embedding vectors and the resolver's log grow with
+#: every claim). 4 MB is about 600,000 words: roughly 1.4 GB and a minute.
+DEFAULT_MAX_TOTAL_BYTES = 4_000_000
 #: The most entity names one build registers. Past this the weakest go first.
 DEFAULT_MAX_ENTITIES = 1500
 
@@ -117,6 +124,7 @@ class FolderBuild:
     files: List[ParsedFile]
     skipped: List[Skipped] = field(default_factory=list)
     entity_confidence: Dict[str, str] = field(default_factory=dict)
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES
 
     def summary(self) -> Dict[str, Any]:
         live = [n for n in self.graph.nodes.values() if n.live]
@@ -130,6 +138,8 @@ class FolderBuild:
             "root": str(self.root),
             "files_read": len(self.files),
             "files_skipped": len(self.skipped),
+            "bytes_read": sum(len(f.raw.encode("utf-8")) for f in self.files),
+            "max_total_bytes": self.max_total_bytes,
             "nodes_live": len(live),
             "edges_live": sum(1 for e in self.graph.edges.values() if e.live),
             "by_type": dict(sorted(by_type.items())),
@@ -143,8 +153,14 @@ def iter_files(
     suffixes: Iterable[str] = DEFAULT_SUFFIXES,
     max_files: int = DEFAULT_MAX_FILES,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
 ) -> Tuple[List[Path], List[Skipped]]:
     """Files under ``root`` worth reading, in a stable order, plus what was skipped.
+
+    Files are admitted in path order while they fit under ``max_total_bytes``;
+    one that would take the total past it is skipped and the walk goes on, so
+    a single large file early in the listing does not shut out everything
+    after it. The result is still fixed by the folder's contents alone.
 
     Symlinks are never followed: a link can point outside the folder the user
     chose, and the graph would then hold text they did not ask to share.
@@ -152,6 +168,7 @@ def iter_files(
     wanted = {s.lower() for s in suffixes}
     found: List[Path] = []
     skipped: List[Skipped] = []
+    total = 0
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames[:] = sorted(
             d for d in dirnames
@@ -182,6 +199,10 @@ def iter_files(
             if len(found) >= max_files:
                 skipped.append(Skipped(rel, f"over the {max_files}-file limit"))
                 continue
+            if total + info.st_size > max_total_bytes:
+                skipped.append(Skipped(rel, total_limit_reason(max_total_bytes)))
+                continue
+            total += info.st_size
             found.append(path)
     return found, skipped
 
@@ -366,6 +387,10 @@ def parse_text(rel: str, raw: str, mtime: float = 0.0) -> ParsedFile:
     return ParsedFile(rel, raw, raw, blocks, title or Path(rel).stem, [], mtime)
 
 
+def total_limit_reason(max_total_bytes: int) -> str:
+    return f"over the {max_total_bytes:,}-byte total limit"
+
+
 class _Unreadable(Exception):
     """A file the walk admitted that turned out not to be safe to read."""
 
@@ -417,6 +442,7 @@ def read_folder(
     suffixes: Iterable[str] = DEFAULT_SUFFIXES,
     max_files: int = DEFAULT_MAX_FILES,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
 ) -> Tuple[Path, List[ParsedFile], List[Skipped]]:
     base = Path(root).expanduser()
     if not base.exists():
@@ -424,8 +450,14 @@ def read_folder(
     if not base.is_dir():
         raise IngestError(f"{base} is not a directory")
     base = base.resolve()
-    paths, skipped = iter_files(base, suffixes=suffixes, max_files=max_files, max_bytes=max_bytes)
+    if max_total_bytes < 1:
+        raise IngestError("the total size limit must be at least 1 byte")
+    paths, skipped = iter_files(
+        base, suffixes=suffixes, max_files=max_files, max_bytes=max_bytes,
+        max_total_bytes=max_total_bytes,
+    )
     files: List[ParsedFile] = []
+    total = 0
     for path in paths:
         rel = path.relative_to(base).as_posix()
         try:
@@ -437,6 +469,11 @@ def read_folder(
         except UnicodeDecodeError:
             skipped.append(Skipped(rel, "not UTF-8 text"))
             continue
+        # The walk budgeted by size on disk; a file can grow before it is read.
+        if total + len(data) > max_total_bytes:
+            skipped.append(Skipped(rel, total_limit_reason(max_total_bytes)))
+            continue
+        total += len(data)
         if "\x00" in raw:
             skipped.append(Skipped(rel, "binary content"))
             continue
@@ -448,8 +485,11 @@ def read_folder(
             continue
         files.append(parsed)
     if not files:
+        over = sum(s.reason == total_limit_reason(max_total_bytes) for s in skipped)
         raise IngestError(
             f"no readable Markdown or text files under {base}"
+            + (f"; {over} files are each larger than the "
+               f"{max_total_bytes:,}-byte total limit" if over else "")
             + (f" ({len(skipped)} skipped)" if skipped else "")
         )
     return base, files, skipped
@@ -521,9 +561,10 @@ def discover_entities(
         for key in seen:
             capitalised_df[key] += 1
 
+    wanted = {_words(key) for key in display}
     counts: Counter = Counter()
     for f in files:
-        counts.update(_ngrams(f.clean))
+        counts.update(_name_counts(f.clean, wanted))
     scored: List[Tuple[int, str, str]] = []
     for key, name in display.items():
         occurrences = counts.get(_words(key), 0)
@@ -543,19 +584,23 @@ def _words(text: str) -> Tuple[str, ...]:
     return tuple(_WORD.findall(text.lower()))
 
 
-def _ngrams(text: str) -> Counter:
-    """Every run of up to ``_MAX_NGRAM`` words in ``text``, counted.
+def _name_counts(text: str, wanted: Set[Tuple[str, ...]]) -> Counter:
+    """How often each word sequence in ``wanted`` occurs in ``text``.
 
     One pass per file instead of one regex scan per entity name: a name occurs
     where its word sequence does, which is the same test a word-bounded search
-    makes, punctuation between the words aside.
+    makes, punctuation between the words aside. Only the wanted sequences are
+    kept; counting every run of words instead cost about 130 MB of memory per
+    MB of text.
     """
     words = _words(text)
-    grams: Counter = Counter()
-    for size in range(1, _MAX_NGRAM + 1):
+    counts: Counter = Counter()
+    for size in sorted({len(w) for w in wanted if 0 < len(w) <= _MAX_NGRAM}):
         for i in range(len(words) - size + 1):
-            grams[words[i : i + size]] += 1
-    return grams
+            gram = words[i : i + size]
+            if gram in wanted:
+                counts[gram] += 1
+    return counts
 
 
 # ── claims ───────────────────────────────────────────────────────────────
@@ -605,8 +650,9 @@ def documents_from(
     files: Sequence[ParsedFile], entities: Dict[str, str]
 ) -> List[Document]:
     docs: List[Document] = []
+    wanted = {_words(name) for name in entities}
     for f in files:
-        present = _ngrams(f.clean)
+        present = _name_counts(f.clean, wanted)
         names = [name for name in entities if _words(name) in present]
         docs.append(
             Document(
@@ -630,12 +676,14 @@ def build_folder(
     suffixes: Iterable[str] = DEFAULT_SUFFIXES,
     max_files: int = DEFAULT_MAX_FILES,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
     max_entities: int = DEFAULT_MAX_ENTITIES,
     hop_budget: int = 6,
 ) -> FolderBuild:
     """Read ``root``, discover its entities, and build a walkable graph."""
     base, files, skipped = read_folder(
-        root, suffixes=suffixes, max_files=max_files, max_bytes=max_bytes
+        root, suffixes=suffixes, max_files=max_files, max_bytes=max_bytes,
+        max_total_bytes=max_total_bytes,
     )
     entities = discover_entities(files, max_entities=max_entities)
     docs = documents_from(files, entities)
@@ -676,4 +724,5 @@ def build_folder(
         files=files,
         skipped=skipped,
         entity_confidence=entity_confidence,
+        max_total_bytes=max_total_bytes,
     )
