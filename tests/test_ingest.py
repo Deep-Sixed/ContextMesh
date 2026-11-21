@@ -420,6 +420,22 @@ class EntityDiscoveryTest(FolderFixture):
         self.assertEqual(found.get("Retention Policy"), HIGH)
         self.assertEqual(found.get("shard_store"), HIGH)
 
+    def test_a_capitalised_phrase_never_crosses_a_sentence(self):
+        # "...the Shard Store.\nThe Index Builder..." once read as one name,
+        # and the resolver then folded both real names into it as aliases.
+        for rel in ("one.md", "two.md"):
+            _write(self.root, rel, "# Notes\n\nWrites go to the Shard Store.\n"
+                                   "The Index Builder reads them.\n")
+        _, files, _ = read_folder(self.root)
+        found = discover_entities(files)
+        self.assertIn("Shard Store", found)
+        self.assertIn("Index Builder", found)
+        self.assertFalse([name for name in found if "." in name], found)
+        built = build_folder(self.root)
+        store = built.resolver.match("Shard Store")
+        builder = built.resolver.match("Index Builder")
+        self.assertNotEqual(store[0], builder[0])
+
     def test_entity_nodes_carry_their_confidence(self):
         built = build_folder(self.root)
         entities = [n for n in built.graph.nodes.values() if n.type is NodeType.ENTITY]

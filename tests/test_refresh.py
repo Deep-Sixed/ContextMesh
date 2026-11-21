@@ -271,6 +271,23 @@ class RestoreTest(RefreshFixture):
         supersedes = self.graph.out_edges(second.id, [EdgeType.SUPERSEDES], live_only=False)
         self.assertEqual([e.dst for e in supersedes], [first.id])
 
+    def test_a_sentence_returning_by_revert_rests_on_new_live_ground(self):
+        # Reverting a file makes its earlier version current again, so the
+        # returning sentence's version is the one its dead predecessor was
+        # read from. It must still get its own, active assumption.
+        first = self.claim("a.md", "The cache is keyed per tenant.")
+        write(self.root, "a.md", "# Cache\n\nThe cache holds entries for an hour.\n", mtime=JUN)
+        self.refresh()
+        write(self.root, "a.md", CACHE)
+        self.refresh()
+        second = self.claim("a.md", "The cache is keyed per tenant.")
+        self.assertNotEqual(first.id, second.id)
+        deps = self.graph.out_edges(second.id, [EdgeType.DEPENDS_ON])
+        self.assertEqual(len(deps), 1)
+        assumption = self.graph.assumptions[deps[0].dst]
+        self.assertEqual(assumption.status.value, "active")
+        self.assertIn("(returned, generation 1)", assumption.statement)
+
     def test_reverting_a_file_makes_its_earlier_version_current_again(self):
         original = self.current_source("a.md")
         write(self.root, "a.md", "# Cache\n\nThe cache holds entries for an hour.\n", mtime=JUN)

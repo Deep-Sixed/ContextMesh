@@ -1,10 +1,9 @@
 # Phase 2 — Incremental folder rebuilds
 
-Status: **design approved; slices 1–3 implemented.** Slice 2 also took the
+Status: **design approved; all four slices implemented.** Slice 2 also took the
 restore (`supersedes`) and location-update parts of slice 3, because a refresh
 without them would reattach a returning sentence to its dead claim and leave
-kept claims pointing at stale lines. Remaining: the property and persistence
-tests (slice 4).
+kept claims pointing at stale lines.
 
 Phase 1 (PR #48) builds a graph from a folder in one pass. Every change to the
 folder means rebuilding from scratch, at roughly 15 seconds per MB of text, and
@@ -298,6 +297,40 @@ Property tests over sequences of folder states, alongside unit tests:
   refreshes in memory.
 - **Unchanged guarantees.** The full existing suite, the demo export check and
   the leak check pass.
+
+### As built (slice 4)
+
+`tests/test_refresh_properties.py` runs seeded random edit sequences (edit,
+add, delete, touch, restore an earlier content) and checks every invariant
+above after each refresh, plus: what `RefreshReport.downstream` lists fell;
+every retired claim was retired by evidence through its own assumption; one
+current source per file present, and no source invalidated; zero untyped
+edges; and a lossless snapshot round trip. CI runs 20 seeds × 8 steps. A local
+stress run of 300 seeds × 15 steps passes.
+
+Two comparisons needed care, and both are recorded so they aren't "fixed"
+back:
+
+- **Claim mentions are compared by the names an entity answers to, not by its
+  id or label.** When several names fold into one entity, the first one
+  registered names it. A refresh registers in history order and a fresh
+  build in file order, so the same group of names can carry a different
+  label. The links are equivalent.
+- **The refreshed graph may mention more than a fresh build.** An entity that
+  once qualified is never removed, so its links stay.
+
+The random runs found two real bugs, both fixed with regression tests:
+
+1. **A sentence returning by revert rested on a rejected assumption.**
+   Reverting a file makes its earlier version current again, so a returning
+   sentence's statement matched its dead predecessor's, and `assume` returned
+   the rejected record. Statements now carry the claim's generation when it
+   is above 0, and `assume_claims` refuses to attach a non-active assumption.
+2. **Capitalised phrases crossed sentence boundaries (Phase 1 code).**
+   "…the Shard Store.⏎The Index Builder…" read as one name, and the resolver
+   folded both real names into it as aliases, in full builds too. Words in a
+   phrase are now separated by spaces or tabs only, and a dot is allowed
+   inside a word (`Node.js`) but not at its end.
 
 ## Open decisions
 

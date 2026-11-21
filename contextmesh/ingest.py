@@ -55,7 +55,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .assumptions import AssumptionLedger
 from .graph import ContextGraph
-from .model import EdgeType, NodeType, slug
+from .model import AssumptionStatus, EdgeType, NodeType, slug
 from .pipeline import BuildReport, Document, Pipeline
 from .resolve import Resolver
 from .traverse import Walker
@@ -579,7 +579,12 @@ def read_folder(
 
 
 # ── entities ─────────────────────────────────────────────────────────────
-_CAPITALISED = re.compile(r"\b([A-Z][A-Za-z0-9+.-]*(?:\s+[A-Z][A-Za-z0-9+.-]*){0,4})\b")
+# A capitalised phrase never crosses a sentence: words are separated by spaces
+# or tabs only (not newlines), and a dot is allowed inside a word ("Node.js")
+# but not at its end. Without both, "…the Shard Store.\nThe Index Builder…"
+# read as one name, and the resolver then folded the two real names into it.
+_CAP_WORD = r"[A-Z][A-Za-z0-9+-]*(?:\.[A-Za-z0-9+-]+)*"
+_CAPITALISED = re.compile(rf"\b({_CAP_WORD}(?:[ \t]+{_CAP_WORD}){{0,4}})\b")
 _IDENT_OK = re.compile(r"^[A-Za-z][\w.+/-]*(?: [\w.+/-]+){0,3}$")
 
 #: Capitalised words that start phrases without naming anything.
@@ -739,14 +744,34 @@ def source_id_for(rel: str, sha256: str) -> str:
 CLAIM_ASSUMPTION_AUTHOR = "folder-ingest"
 
 
-def claim_assumption_statement(rel: str, sha256: str, sentence: str) -> str:
+def claim_assumption_statement(
+    rel: str, sha256: str, sentence: str, generation: int = 0
+) -> str:
     """What every folder claim rests on: that its file still says it.
 
-    The statement names the file version the claim was first read from, so a
-    sentence that is retired and later returns gets a different assumption,
-    never the rejected one back.
+    The statement names the file version the claim was first read from and,
+    for a sentence that returned after being retired, the claim's generation.
+    The version alone is not enough: a file reverted to earlier content is
+    that earlier version again, so a returning sentence would otherwise name
+    its dead predecessor's statement, and ``assume`` would hand back the
+    rejected assumption instead of new ground.
     """
-    return f'{rel}@{sha256[:12]} says: "{sentence}"'
+    statement = f'{rel}@{sha256[:12]} says: "{sentence}"'
+    if generation:
+        statement += f" (returned, generation {generation})"
+    return statement
+
+
+def _claim_generation(claim_id: str, sentence: str, rel: str) -> int:
+    """Which generation of ``sentence`` in ``rel`` the claim ``claim_id`` is."""
+    from .pipeline import claim_id_for
+
+    generation = 0
+    while claim_id_for(sentence, rel, generation) != claim_id:
+        generation += 1
+        if generation > 10_000:
+            raise ValueError(f"{claim_id!r} is not a claim id for this sentence in {rel!r}")
+    return generation
 
 
 def documents_from(
@@ -869,9 +894,23 @@ def assume_claims(
         if parsed is None or graph.out_edges(node.id, [EdgeType.DEPENDS_ON], live_only=False):
             continue
         assumption = ledger.assume(
-            claim_assumption_statement(parsed.path, parsed.sha256, node.label),
+            claim_assumption_statement(
+                parsed.path,
+                parsed.sha256,
+                node.label,
+                _claim_generation(node.id, node.label, parsed.path),
+            ),
             created_by=CLAIM_ASSUMPTION_AUTHOR,
         )
+        # A claim must rest on live ground. ``assume`` returns an existing
+        # assumption for an identical statement whatever its status, so a
+        # collision with a retired claim's statement would silently attach a
+        # rejected one: refuse instead.
+        if assumption.status is not AssumptionStatus.ACTIVE:
+            raise ValueError(
+                f"claim {node.id!r} would rest on {assumption.status.value} "
+                f"assumption {assumption.id!r}"
+            )
         ledger.depends(node.id, assumption.id)
         covered.append(node.id)
     return covered
