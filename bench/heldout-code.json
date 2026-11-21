@@ -1,0 +1,27 @@
+{
+  "name": "heldout-code",
+  "about": "HELD OUT. Written from the raw docstrings of contextmesh_mcp/, a package no other suite reads, before any hybrid-retrieval code existed. Never used to choose or calibrate anything; run once to evaluate. Same author as the code, so not independent: questions written by someone who has not seen the implementation are still wanted.",
+  "corpus": {
+    "root": "../contextmesh_mcp",
+    "suffixes": [".py"],
+    "exclude": []
+  },
+  "answerable": [
+    {"q": "Do the read tools import the MCP SDK?", "paths": ["tools.py"], "any": ["nothing here imports the mcp sdk"]},
+    {"q": "What does a successful controlled-write reply guarantee?", "paths": ["writes.py"], "any": ["committed session generation"]},
+    {"q": "Where is a controlled write applied before it goes live?", "paths": ["writes.py"], "any": ["lossless in-memory clone"]},
+    {"q": "Why does loading a session fail closed?", "paths": ["session.py"], "any": ["half-loads"]},
+    {"q": "Is an error about another process writing the session a SessionError?", "paths": ["session.py"], "any": ["not a sessionerror"]},
+    {"q": "Why does the MCP server need Python 3.10?", "paths": ["server.py"], "any": ["mcp sdk does"]},
+    {"q": "Can an MCP client reject an assumption directly?", "paths": ["server.py"], "any": ["no direct reject"]},
+    {"q": "Why are session file names zero-padded?", "paths": ["session.py"], "any": ["sorts readably"]},
+    {"q": "Is one session per process suitable for a shared service?", "paths": ["session.py"], "any": ["not right for a shared service"]},
+    {"q": "Why is a resolved pathname not a directory's identity?", "paths": ["session.py"], "any": ["renamed"]}
+  ],
+  "out_of_scope": [
+    "How tall is Mount Kilimanjaro?",
+    "Which airline has the most legroom in economy?",
+    "What is a good recipe for sourdough bread?",
+    "Who wrote the novel Middlemarch?"
+  ]
+}

@@ -113,17 +113,34 @@ class RunTest(unittest.TestCase):
 class RepositorySuiteTest(unittest.TestCase):
     """The shipped suite stays valid as the docs change."""
 
-    def test_the_repo_suite_names_files_that_exist_and_no_duplicate_questions(self):
-        path = REPO / "bench" / "contextmesh-docs.json"
-        data = load_suite(path)
-        root = (path.parent / data["corpus"]["root"]).resolve()
-        questions = [q["q"] for q in data["answerable"]] + data["out_of_scope"]
-        self.assertEqual(len(questions), len(set(questions)))
-        for expected in data["answerable"]:
-            self.assertTrue(expected["paths"] and expected["any"], expected["q"])
-            for rel in expected["paths"]:
-                self.assertTrue((root / rel).is_file(), rel)
-                self.assertNotIn(rel, data["corpus"]["exclude"], rel)
+    def test_every_shipped_suite_names_files_that_exist_and_no_duplicate_questions(self):
+        # Structural only: running a held-out suite here would expose its
+        # results during development, which is what holding it out prevents.
+        suites = sorted((REPO / "bench").glob("*.json"))
+        self.assertGreaterEqual(len(suites), 4)
+        for path in suites:
+            with self.subTest(suite=path.name):
+                data = load_suite(path)
+                root = (path.parent / data["corpus"]["root"]).resolve()
+                self.assertTrue(root.is_dir(), root)
+                questions = [q["q"] for q in data["answerable"]] + data["out_of_scope"]
+                self.assertEqual(len(questions), len(set(questions)))
+                for expected in data["answerable"]:
+                    self.assertTrue(expected["paths"] and expected["any"], expected["q"])
+                    for rel in expected["paths"]:
+                        self.assertTrue((root / rel).is_file(), (path.name, rel))
+                        self.assertNotIn(rel, data["corpus"]["exclude"], rel)
+                        suffix = Path(rel).suffix
+                        self.assertIn(suffix, data["corpus"].get("suffixes", [suffix]), rel)
+
+    def test_held_out_suites_share_no_question_with_development_suites(self):
+        def questions(name):
+            data = load_suite(REPO / "bench" / name)
+            return {q["q"] for q in data["answerable"]}
+
+        development = questions("contextmesh-docs.json") | questions("contextmesh-code.json")
+        for name in ("heldout-docs.json", "heldout-code.json"):
+            self.assertFalse(questions(name) & development, name)
 
     def test_the_cli_refuses_a_missing_suite(self):
         err = io.StringIO()

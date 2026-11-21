@@ -1,0 +1,27 @@
+{
+  "name": "heldout-docs",
+  "about": "HELD OUT. Written from the raw README text before any hybrid-retrieval code existed, from sections the contextmesh-docs suite does not ask about. Never used to choose or calibrate anything; run once to evaluate. Same author as the code, so not independent: questions written by someone who has not seen the implementation are still wanted.",
+  "corpus": {
+    "root": "..",
+    "suffixes": [".md", ".markdown", ".mdx", ".txt", ".rst", ".text"],
+    "exclude": ["docs/BENCHMARKS.md"]
+  },
+  "answerable": [
+    {"q": "Which checkpoint mode does a served session use by default?", "paths": ["README.md"], "any": ["every-ask"]},
+    {"q": "What does restarting the server fail to restore?", "paths": ["README.md"], "any": ["walk list", "event log"]},
+    {"q": "Which MCP tool causes a session commit?", "paths": ["README.md"], "any": ["mesh_ask"]},
+    {"q": "What does the unresolved_entities health signal count?", "paths": ["README.md"], "any": ["near misses"]},
+    {"q": "Why is checkpointing only on exit risky?", "paths": ["README.md"], "any": ["killed"]},
+    {"q": "When should a session be served without ever writing to it?", "paths": ["README.md"], "any": ["handed"]},
+    {"q": "What graph node type represents a task in the runner?", "paths": ["README.md"], "any": ["decision node"]},
+    {"q": "Does a saved graph keep each node's embedding?", "paths": ["README.md"], "any": ["embedding vector"]},
+    {"q": "Where does each dashboard panel get its data?", "paths": ["README.md"], "any": ["query against the graph"]},
+    {"q": "Which document records the original capture frame by frame?", "paths": ["README.md"], "any": ["frame-by-frame"]}
+  ],
+  "out_of_scope": [
+    "How tall is Mount Kilimanjaro?",
+    "Which airline has the most legroom in economy?",
+    "What is a good recipe for sourdough bread?",
+    "Who wrote the novel Middlemarch?"
+  ]
+}
