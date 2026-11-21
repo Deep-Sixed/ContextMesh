@@ -99,8 +99,13 @@ class RunTest(unittest.TestCase):
 
     def test_the_same_inputs_give_the_same_result(self):
         first, second = run(suite(), base=self.base), run(suite(), base=self.base)
+        # Wall-clock and allocator figures are measurements of the machine,
+        # not of the method; everything else must match exactly.
         for result in (first, second):
             result["corpus"].pop("build_seconds")
+            for method in result["methods"].values():
+                method.pop("mean_latency_ms", None)
+                method.pop("index_peak_bytes", None)
         self.assertEqual(first, second)
 
     def test_render_reports_coverage_and_every_method(self):
