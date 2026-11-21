@@ -1,0 +1,17 @@
+dev suites: contextmesh-docs.json (8e559abb02566ea2, BM25 top-3 mean 90.9 tokens), contextmesh-code.json (2d59985536756698, BM25 top-3 mean 95.6 tokens)
+grid points meeting the token constraint: 21289
+
+top 10 (correct + refused, then fewest wrong, then fewest tokens):
+{"k": 3, "bm25": 1.0, "coverage": 0.5, "entity": 0.0, "vector": 0.0, "min_coverage": 0.3, "max_answers": 2, "margin": 0.5, "correct": 35, "refused": 13, "wrong": 12, "tokens": 3776, "under_bm25_top3_tokens": true}
+{"k": 5, "bm25": 1.0, "coverage": 0.5, "entity": 0.0, "vector": 0.0, "min_coverage": 0.3, "max_answers": 2, "margin": 0.5, "correct": 35, "refused": 13, "wrong": 12, "tokens": 3847, "under_bm25_top3_tokens": true}
+{"k": 10, "bm25": 1.0, "coverage": 0.5, "entity": 0.0, "vector": 0.0, "min_coverage": 0.3, "max_answers": 2, "margin": 0.5, "correct": 35, "refused": 13, "wrong": 12, "tokens": 3847, "under_bm25_top3_tokens": true}
+{"k": 3, "bm25": 1.0, "coverage": 0.5, "entity": 0.0, "vector": 0.0, "min_coverage": 0.3, "max_answers": 3, "margin": 0.5, "correct": 35, "refused": 13, "wrong": 12, "tokens": 4373, "under_bm25_top3_tokens": true}
+{"k": 5, "bm25": 1.0, "coverage": 0.5, "entity": 0.0, "vector": 0.0, "min_coverage": 0.3, "max_answers": 3, "margin": 0.5, "correct": 35, "refused": 13, "wrong": 12, "tokens": 4489, "under_bm25_top3_tokens": true}
+{"k": 10, "bm25": 1.0, "coverage": 0.5, "entity": 0.0, "vector": 0.0, "min_coverage": 0.3, "max_answers": 3, "margin": 0.5, "correct": 35, "refused": 13, "wrong": 12, "tokens": 4560, "under_bm25_top3_tokens": true}
+{"k": 3, "bm25": 0.0, "coverage": 0.5, "entity": 0.0, "vector": 0.0, "min_coverage": 0.3, "max_answers": 2, "margin": 0.1, "correct": 35, "refused": 13, "wrong": 13, "tokens": 3629, "under_bm25_top3_tokens": true}
+{"k": 3, "bm25": 0.0, "coverage": 1.0, "entity": 0.0, "vector": 0.0, "min_coverage": 0.3, "max_answers": 2, "margin": 0.25, "correct": 35, "refused": 13, "wrong": 13, "tokens": 3821, "under_bm25_top3_tokens": true}
+{"k": 3, "bm25": 0.0, "coverage": 2.0, "entity": 0.0, "vector": 0.0, "min_coverage": 0.3, "max_answers": 2, "margin": 0.5, "correct": 35, "refused": 13, "wrong": 13, "tokens": 3821, "under_bm25_top3_tokens": true}
+{"k": 3, "bm25": 0.5, "coverage": 1.0, "entity": 0.0, "vector": 0.0, "min_coverage": 0.3, "max_answers": 2, "margin": 0.5, "correct": 35, "refused": 13, "wrong": 13, "tokens": 3827, "under_bm25_top3_tokens": true}
+
+chosen: {"k": 3, "bm25": 1.0, "coverage": 0.5, "entity": 0.0, "vector": 0.0, "min_coverage": 0.3, "max_answers": 2, "margin": 0.5}
+on dev: {"correct": 35, "refused": 13, "wrong": 12, "tokens": 3776, "under_bm25_top3_tokens": true}
