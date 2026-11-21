@@ -58,6 +58,13 @@ That path is the justification. There is no second pass that reconstructs a
 rationale after the fact — the walk *is* the reasoning, and it is stored, so the
 same question does not get re-guessed next time.
 
+The "7,307 flat" in that output is not a measured alternative. It is a fixed
+budget: 40 claims sampled by a hash of the question, plus 160 tokens of window
+each, and it is never checked for the answer. For measured accuracy and token
+cost against a real retriever (BM25 over the same sentences) on labelled
+questions, see [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md), or run
+`python -m contextmesh bench`.
+
 When the graph cannot answer, it says which of exactly four things went wrong
 rather than returning its best guess:
 
