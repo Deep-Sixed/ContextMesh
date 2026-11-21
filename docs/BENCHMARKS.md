@@ -139,6 +139,102 @@ still reads only Markdown and text now that `.py` files are read by default.
 Code ingestion did not change its results. Its fingerprint moves only when the
 repo's Markdown does.
 
+## Hybrid retrieval
+
+`contextmesh/hybrid.py` (`HybridRetriever`) combines the two:
+1. **Candidates:** BM25 picks candidate claims, from live claims only.
+2. **Re-ranking:** the candidates are re-ranked.
+3. **Evidence or refusal:** the answer comes with its evidence path in the
+   graph (question entity → claim → source, with the file location). If the
+   best candidate covers too little of the question, it refuses instead.
+4. **Close calls:** up to one runner-up is returned alongside, and paid for in
+   tokens.
+
+The defaults were chosen by `ops/calibrate-hybrid.py` on the two development
+suites only, with the held-out suites committed beforehand (commit `eea2b08`)
+and run once, after the implementation was committed (`cb49b46`). The grid
+search covered 21,289 settings; the output is `ops/calibrate-hybrid.log`.
+"Wrong" below means answered, and not correctly. Refusing an answerable
+question counts as neither correct nor wrong.
+
+### Development suites (calibrated on)
+
+| Docs, corpus `92c57aeb78f8236b` | Correct | Wrong | Tokens | Out-of-scope refused | Latency |
+|---|---|---|---|---|---|
+| Hybrid | 22/32 | 8 | 73 | 8/8 | 0.8 ms |
+| Graph walk | 17/32 | 15 | 60 | 5/8 | 13.9 ms |
+| BM25 top-1 | 17/32 | 15 | 26 | 3/8 | 0.4 ms |
+| BM25 top-3 | 22/32 | 10 | 91 | 3/8 | 0.3 ms |
+
+| Code, corpus `bcc84c2d7e3bfc0f` | Correct | Wrong | Tokens | Out-of-scope refused | Latency |
+|---|---|---|---|---|---|
+| Hybrid | 13/18 | 4 | 80 | 5/6 | 0.9 ms |
+| Graph walk | 12/18 | 6 | 77 | 6/6 | 13.2 ms |
+| BM25 top-1 | 12/18 | 6 | 31 | 2/6 | 0.5 ms |
+| BM25 top-3 | 15/18 | 3 | 96 | 2/6 | 0.4 ms |
+
+### Held-out suites (run once, never calibrated on)
+
+| Docs, corpus `92c57aeb78f8236b` | Correct | Wrong | Tokens | Out-of-scope refused |
+|---|---|---|---|---|
+| Hybrid | 3/10 | 3 | 48 | 4/4 |
+| Graph walk | 1/10 | 9 | 58 | 4/4 |
+| BM25 top-1 | 4/10 | 6 | 27 | 2/4 |
+| BM25 top-3 | 4/10 | 6 | 95 | 2/4 |
+| BM25 top-5 | 5/10 | 5 | 157 | 2/4 |
+
+| Code, `contextmesh_mcp/`, corpus `b4d5e0662d61b4fb` | Correct | Wrong | Tokens | Out-of-scope refused |
+|---|---|---|---|---|
+| Hybrid | 7/10 | 3 | 84 | 4/4 |
+| Graph walk | 5/10 | 5 | 71 | 4/4 |
+| BM25 top-1 | 3/10 | 7 | 33 | 2/4 |
+| BM25 top-3 | 8/10 | 2 | 94 | 2/4 |
+
+### Against the acceptance criteria
+
+| Criterion | Target | Result |
+|---|---|---|
+| Docs accuracy | exceed 22/32 | **Not met.** 22/32: ties BM25 top-3, does not exceed it. Held out: 3/10, below BM25 top-1's 4/10. |
+| Code accuracy | at least 15/18 | **Not met.** 13/18, below BM25 top-3's 15/18 in the same run. (15/18 was the walk's figure before the generic-hub fix; graph-only is 12/18 in this run.) Held out: 7/10, against BM25 top-3's 8/10. |
+| Out-of-scope refusals | maintain or improve | **Met.** 8/8 docs, 5/6 code, 4/4 and 4/4 held out, against BM25's 3/8, 2/6, 2/4 and 2/4. The walk is 6/6 on code, one better. |
+| Tokens | below BM25 top-3 where possible | **Met everywhere it was measured.** 73 vs 91, 80 vs 96, 48 vs 95, 84 vs 94. |
+| Provenance | complete evidence paths | **Met.** Every answer carries entity → claim → source over live edges, with the file location (tested). |
+| Invalidation | never retrieve retired claims | **Met.** The index holds live claims only and is rebuilt when the graph moves. Tested on rejection and on refresh. |
+| Reproducibility | same inputs, same results | **Met.** Asking is read-only (`Resolver.match`), answers do not depend on order, and the graph and resolver are byte-identical after asking (tested). |
+
+### What it says
+
+- **The hybrid is a precision gain, not an accuracy gain.** On held-out docs
+  it answered 6 of 10 questions and got 3 right. BM25 top-1 answered all 10
+  and got 4 right, so it was wrong 6 times to the hybrid's 3. Of the 4
+  questions the hybrid refused, BM25 top-1 got 1 right. It gave up one
+  correct answer to avoid three wrong ones. Whether that trade is right
+  depends on how costly a confident wrong answer is.
+- **The refusal threshold overfits.** Calibrated on the development suites,
+  it refused no in-scope question on held-out code, but 4 of 10 on held-out
+  docs, which ask in other words than the documents use. Coverage is lexical,
+  so a paraphrase looks like thin evidence.
+- **The graph's re-ranking signals earned no weight.** Calibration set entity
+  overlap and embedding similarity to 0. On these suites the graph
+  contributes the evidence path, live-only retrieval and invalidation, not the
+  choice of answer. The walk alone stays weakest on held-out docs (1/10, 9
+  wrong).
+- **Cost:** about 1 ms per question against the walk's 12–16 ms. The index
+  peaks at about 1.2 MB for 805 claims and 1.4 MB for 1,010.
+- **Held-out questions are harder for every method.** BM25 top-5 gets 5 of
+  10 on held-out docs, although every answer is in a claim. The development
+  suites, written closer to the documents' wording, flatter everything.
+
+### What would move it
+
+- **A semantic measure of evidence, not a lexical one.** That would let
+  refusal tell "says it differently" from "doesn't say it". This is the
+  largest lever the held-out docs point to, and the one that needs a model or
+  a better embedding than the hashed one the engine has.
+- **Independently written questions.** The held-out suites were written by
+  the same author as the code, before the hybrid existed, so they guard
+  against tuning but not against blind spots.
+
 ## Limits
 
 - **One small corpus.** 12 files of single-sentence claims. Long-document
@@ -158,8 +254,12 @@ repo's Markdown does.
 
 1. **Use lexical search to seed the walk.** BM25 top-1 matches the walk's
    accuracy at under half its cost, and they get different questions right.
+   *Tried:* see [Hybrid retrieval](#hybrid-retrieval). It gains precision and
+   refusals, not accuracy.
 2. **Teach the walk to refuse in-scope questions it can't answer.** For
    example, refuse below a relevance score. Right now it never does.
+   *Tried in the hybrid,* with a lexical coverage threshold. It cuts wrong
+   answers, but it also refuses paraphrased questions it could have answered.
 3. **Widen the extractor's verb test.** Three of 32 answers never became
    claims.
 4. **Add independently labelled suites,** including a user's own notes folder.
