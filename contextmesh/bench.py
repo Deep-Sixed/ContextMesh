@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .embed import tokens
-from .ingest import build_folder, iter_files
+from .ingest import PROSE_SUFFIXES, build_folder, iter_files
 from .model import NodeType
 
 K_VALUES = (1, 3, 5)
@@ -104,9 +104,11 @@ class BM25:
         return [i for _, i in scored[:k]]
 
 
-def _copy_corpus(root: Path, exclude: Sequence[str], dest: Path) -> List[str]:
+def _copy_corpus(
+    root: Path, exclude: Sequence[str], dest: Path, suffixes: Sequence[str]
+) -> List[str]:
     """Copy the corpus's readable files into ``dest``, minus ``exclude``."""
-    paths, _ = iter_files(root)
+    paths, _ = iter_files(root, suffixes=suffixes)
     kept = []
     for path in paths:
         rel = path.relative_to(root).as_posix()
@@ -135,9 +137,13 @@ def run(suite: Dict[str, Any], base: Any = ".") -> Dict[str, Any]:
     """
     root = (Path(base) / suite["corpus"].get("root", ".")).resolve()
     exclude = list(suite["corpus"].get("exclude", []))
+    # A suite names the file types it covers, so a new default (code files)
+    # cannot quietly change what an existing suite measures. Prose only when
+    # unsaid, which is what suites meant before code was read.
+    suffixes = list(suite["corpus"].get("suffixes", sorted(PROSE_SUFFIXES)))
     with tempfile.TemporaryDirectory() as tmp:
         corpus = Path(tmp) / "corpus"
-        rels = _copy_corpus(root, exclude, corpus)
+        rels = _copy_corpus(root, exclude, corpus, suffixes)
         started = time.perf_counter()
         built = build_folder(corpus)
         build_seconds = time.perf_counter() - started

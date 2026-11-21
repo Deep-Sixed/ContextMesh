@@ -42,11 +42,14 @@ cap are skipped and reported, never silently dropped.
 
 from __future__ import annotations
 
+import ast
 import bisect
 import hashlib
+import io
 import os
 import re
 import stat
+import tokenize
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -62,7 +65,10 @@ from .traverse import Walker
 
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".mdx"})
 TEXT_SUFFIXES = frozenset({".txt", ".rst", ".text"})
-DEFAULT_SUFFIXES = MARKDOWN_SUFFIXES | TEXT_SUFFIXES
+#: Source files read for their docstrings and comments, never their code.
+CODE_SUFFIXES = frozenset({".py"})
+PROSE_SUFFIXES = MARKDOWN_SUFFIXES | TEXT_SUFFIXES
+DEFAULT_SUFFIXES = PROSE_SUFFIXES | CODE_SUFFIXES
 
 #: Directory names never descended into, on top of every hidden directory.
 SKIP_DIRS = frozenset({
@@ -96,7 +102,10 @@ class IngestError(Exception):
 class Block:
     start: int
     end: int
-    kind: str  # paragraph | list | heading | quote | text
+    kind: str  # paragraph | list | heading | quote | text | docstring | comment
+    #: For code: the qualified name the block documents or sits in
+    #: ("Pipeline.build"), or "" at module level.
+    symbol: str = ""
 
 
 @dataclass
@@ -521,6 +530,231 @@ def _read_bounded(path: Path, max_bytes: int) -> Tuple[bytes, float]:
         os.close(fd)
 
 
+# ── python: docstrings and comments, blanked in place ──────────────────
+#: Comments that instruct a tool rather than tell a reader something.
+_PRAGMA = re.compile(
+    r"^\s*(?:noqa|type:|pragma|pylint:|fmt:|isort:|ruff:|mypy:|pyright:|nosec|coding[:=])",
+    re.I,
+)
+_CODE_CHARS = frozenset("=()[]{}")
+#: A reStructuredText role in front of a code span: ":meth:`x`", ":py:func:`y`".
+_REST_ROLE = re.compile(r":[A-Za-z]+(?::[A-Za-z]+)?:(?=`)")
+_TRIPLE_QUOTES = ('"' * 3, "'" * 3)
+
+
+def _looks_like_code(text: str) -> bool:
+    """A comment run that parses as Python and is shaped like it: commented-out
+    code, not prose. Prose sentences rarely parse; ones that do lack these."""
+    stripped = text.strip()
+    if not stripped or not (_CODE_CHARS & set(stripped)):
+        return False
+    try:
+        ast.parse(stripped)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return False
+    return True
+
+
+def _definitions(tree: ast.AST) -> List[Tuple[str, ast.AST]]:
+    """(qualified name, node) for the module and every class and function."""
+    out: List[Tuple[str, ast.AST]] = [("", tree)]
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = f"{prefix}.{child.name}" if prefix else child.name
+                out.append((name, child))
+                visit(child, name)
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return out
+
+
+def parse_python(rel: str, raw: str, mtime: float = 0.0) -> ParsedFile:
+    """A Python file's prose: its docstrings and comments, never its code.
+
+    Like ``parse_markdown``, everything that is not prose is blanked in place,
+    so the clean text has the file's length and every claim's span and line
+    numbers stay true to the file. Docstring paragraphs and comment runs become
+    blocks that record the definition they document or sit in. Definitions,
+    imports and the module's dotted path count as names the author marked up;
+    as for Markdown, they become entities only where prose mentions them.
+    Pragmas (``# noqa``, ``# type:``...), shebangs and commented-out code are
+    not prose. A file that is not valid Python is refused, not guessed at.
+    """
+    try:
+        tree = ast.parse(raw, filename=rel)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        line = getattr(exc, "lineno", None)
+        raise _Unreadable("not valid Python" + (f" (line {line})" if line else "")) from exc
+
+    lines = raw.split("\n")
+    line_starts = [0]
+    for text in lines[:-1]:
+        line_starts.append(line_starts[-1] + len(text) + 1)
+
+    def offset(lineno: int, col_bytes: int) -> int:
+        # ast columns count UTF-8 bytes; the clean text counts characters.
+        text = lines[lineno - 1]
+        col = len(text.encode("utf-8")[:col_bytes].decode("utf-8", errors="ignore"))
+        return line_starts[lineno - 1] + col
+
+    chars = [" " if ch != "\n" else "\n" for ch in raw]
+    blocks: List[Block] = []
+    marked: List[str] = []
+    title = ""
+    definitions = _definitions(tree)
+
+    def keep(start: int, end: int) -> None:
+        """Copy raw[start:end] into the clean text, inline markup blanked."""
+        cursor = start
+        while cursor < end:
+            line_end = raw.find("\n", cursor, end)
+            line_end = end if line_end < 0 else line_end
+            line = _REST_ROLE.sub(lambda m: " " * len(m.group(0)), raw[cursor:line_end])
+            chars[cursor:line_end] = list(_blank_inline(line, marked))
+            cursor = line_end + 1
+
+    def paragraphs(start: int, end: int, kind: str, symbol: str) -> None:
+        """A docstring's prose paragraphs as blocks, one per list item.
+
+        Paragraphs are separated by blank lines. A paragraph that is code — a
+        doctest, the indented block after a ``::``, an example that parses as
+        Python — is left blanked: it is not something the author asserts.
+        """
+        after_literal = False
+        for m in re.finditer(r"\S(?:.*\S)?(?:\n(?![ \t]*\n)[ \t]*\S.*)*", raw[start:end]):
+            text = m.group(0).rstrip()
+            first = start + m.start()
+            indent = first - (raw.rfind("\n", 0, first) + 1)
+            literal, after_literal = after_literal and indent > 0, text.endswith("::")
+            dedented = "\n".join(line.strip() for line in text.split("\n"))
+            if (
+                literal
+                or dedented.startswith((">>>", "..."))
+                or _looks_like_code(dedented)
+            ):
+                for i in range(first, first + len(text)):
+                    if chars[i] != "\n":
+                        chars[i] = " "
+                continue
+            # One block per list item, as in Markdown.
+            cursor = first
+            for item in re.finditer(r"(?m)^[ \t]*(?:[-*+]|\d{1,3}[.)])[ \t]+", text):
+                item_start = first + item.start()
+                if item_start > cursor:
+                    blocks.append(Block(cursor, item_start - 1, kind, symbol))
+                for i in range(item_start, first + item.end()):
+                    chars[i] = " "
+                cursor = first + item.end()
+            if cursor < first + len(text):
+                blocks.append(Block(cursor, first + len(text), kind, symbol))
+
+    # Docstrings, and the names each definition gives.
+    module = rel[:-3].replace("/", ".") if rel.endswith(".py") else rel
+    if module.endswith(".__init__"):
+        module = module[: -len(".__init__")]
+    marked.append(module)
+    for symbol, node in definitions:
+        if symbol and not symbol.split(".")[-1].startswith("_"):
+            marked.append(symbol)
+            marked.append(symbol.split(".")[-1])
+        body = getattr(node, "body", None)
+        if not body or not isinstance(body[0], ast.Expr):
+            continue
+        value = body[0].value
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+            continue
+        if getattr(value, "end_lineno", None) is None:
+            continue
+        start = offset(value.lineno, value.col_offset)
+        end = offset(value.end_lineno, value.end_col_offset)
+        literal = raw[start:end]
+        prefix = len(literal) - len(literal.lstrip("rRbBuUfF"))
+        triple = literal[prefix:prefix + 3]
+        quote = triple if triple in _TRIPLE_QUOTES else literal[prefix:prefix + 1]
+        inner_start, inner_end = start + prefix + len(quote), end - len(quote)
+        if inner_end <= inner_start:
+            continue
+        keep(inner_start, inner_end)
+        paragraphs(inner_start, inner_end, "docstring", symbol)
+        if not symbol and not title:
+            title = raw[inner_start:inner_end].strip().split("\n", 1)[0].strip()[:80]
+
+    # Imports name things this file uses.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            marked.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            marked.extend(alias.name for alias in node.names if alias.name != "*")
+
+    # line -> innermost definition containing it. Outer definitions are laid
+    # down first and inner ones over them, so one pass serves every comment
+    # (scanning every definition per comment is quadratic on large files).
+    innermost = [""] * (len(lines) + 2)
+    for symbol, node in sorted(
+        (d for d in definitions if d[0]), key=lambda d: d[0].count(".")
+    ):
+        first = getattr(node, "lineno", 0)
+        last = getattr(node, "end_lineno", None) or first
+        for row in range(first, min(last, len(lines)) + 1):
+            innermost[row] = symbol
+
+    def enclosing(lineno: int) -> str:
+        """The innermost definition whose lines include ``lineno``."""
+        return innermost[lineno] if 0 <= lineno < len(innermost) else ""
+
+    # Comments: a run of full-line comments at one indent is one block; an
+    # inline comment is a block of its own.
+    run: List[Tuple[int, int, int, int]] = []  # (row, col, text start, text end)
+
+    def flush() -> None:
+        if not run:
+            return
+        text = "\n".join(raw[a:b] for _, _, a, b in run)
+        if not _looks_like_code(text):
+            for _, _, a, b in run:
+                keep(a, b)
+            blocks.append(Block(run[0][2], run[-1][3], "comment", enclosing(run[0][0])))
+        run.clear()
+
+    try:
+        found = list(tokenize.generate_tokens(io.StringIO(raw).readline))
+    except (tokenize.TokenError, SyntaxError):
+        found = []
+    for tok in found:
+        if tok.type != tokenize.COMMENT:
+            continue
+        row, col = tok.start
+        if row == 1 and tok.string.startswith("#!"):
+            continue
+        body = tok.string.lstrip("#")
+        if body.startswith(":"):
+            body = body[1:]  # Sphinx's "#:" attribute comment
+        if not body.strip() or _PRAGMA.match(body):
+            flush()
+            continue
+        hashes = len(tok.string) - len(body)
+        text_start = line_starts[row - 1] + col + hashes + (len(body) - len(body.lstrip()))
+        text_end = line_starts[row - 1] + col + len(tok.string)
+        if lines[row - 1][:col].strip():
+            flush()
+            run.append((row, col, text_start, text_end))
+            flush()
+            continue
+        if run and (run[-1][0] != row - 1 or run[-1][1] != col):
+            flush()
+        run.append((row, col, text_start, text_end))
+    flush()
+
+    blocks.sort(key=lambda b: b.start)
+    clean = "".join(chars)
+    assert len(clean) == len(raw), "python blanking must preserve length"
+    return ParsedFile(rel, raw, clean, blocks, title or Path(rel).stem, marked, mtime)
+
+
 def read_folder(
     root: Any,
     *,
@@ -559,8 +793,18 @@ def read_folder(
         total += len(data)
         newlines = _newline_style(raw)
         raw = raw.replace("\r\n", "\n").replace("\r", "\n")
-        parse = parse_markdown if path.suffix.lower() in MARKDOWN_SUFFIXES else parse_text
-        parsed = parse(rel, raw, mtime)
+        suffix = path.suffix.lower()
+        if suffix in CODE_SUFFIXES:
+            parse = parse_python
+        elif suffix in MARKDOWN_SUFFIXES:
+            parse = parse_markdown
+        else:
+            parse = parse_text
+        try:
+            parsed = parse(rel, raw, mtime)
+        except _Unreadable as exc:
+            skipped.append(Skipped(rel, str(exc)))
+            continue
         parsed.encoding, parsed.newlines, parsed.size_bytes = encoding, newlines, len(data)
         parsed.sha256 = hashlib.sha256(data).hexdigest()
         if not parsed.blocks:
@@ -696,7 +940,9 @@ def _claim_confidence(kind: str, sentence: str) -> str:
     words = len(sentence.split())
     if kind == "heading" or words > 60:
         return LOW
-    if kind in ("paragraph", "text") and sentence.rstrip()[-1:] in ".!?":
+    # A comment is graded no higher than medium: comments drift from the code
+    # they describe more readily than prose meant to be read.
+    if kind in ("paragraph", "text", "docstring") and sentence.rstrip()[-1:] in ".!?":
         return HIGH
     return MEDIUM
 
@@ -708,10 +954,10 @@ def _annotator(by_doc: Dict[str, ParsedFile]):
         parsed = by_doc.get(doc.id)
         if parsed is None:
             return None
-        kind = "paragraph"
+        kind, symbol = "paragraph", ""
         for block in kinds[doc.id]:
             if block.start <= start < block.end:
-                kind = block.kind
+                kind, symbol = block.kind, block.symbol
                 break
         line_start = parsed.line_of(start)
         line_end = parsed.line_of(max(start, end - 1))
@@ -725,6 +971,7 @@ def _annotator(by_doc: Dict[str, ParsedFile]):
             "extraction": EXTRACTION_METHOD,
             "confidence": _claim_confidence(kind, sentence),
             "verified": False,
+            **({"symbol": symbol} if symbol else {}),
         }
 
     return annotate

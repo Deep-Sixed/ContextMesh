@@ -151,10 +151,23 @@ What it does, and deliberately does not do:
   skipped. Raise the cap with `--max-total-mb` (on `ingest`, `ask`, `health`
   and `contextmesh_mcp`), or point it at a narrower folder.
 
-Markdown (`.md`, `.markdown`, `.mdx`) and plain text (`.txt`, `.rst`) only for
-now, as UTF-8, or as UTF-16 when the file starts with a byte-order mark (as
-Notepad and PowerShell write it). UTF-16 without a byte-order mark is skipped
-with a reason rather than guessed at. Code, PDFs and images are not read yet.
+Markdown (`.md`, `.markdown`, `.mdx`), plain text (`.txt`, `.rst`) and Python
+(`.py`) are read, as UTF-8, or as UTF-16 when the file starts with a
+byte-order mark (as Notepad and PowerShell write it). UTF-16 without a
+byte-order mark is skipped with a reason rather than guessed at. PDFs and
+images are not read yet.
+
+**Python files contribute their prose, not their code.** Docstring paragraphs
+and comment runs become claims, located like any other, and each records the
+definition it documents or sits in (`symbol: "Pipeline.build"`). Docstring
+sentences are graded like paragraphs; comments are graded no higher than
+`medium`, because comments drift from the code they describe. Code itself is
+never a claim: examples, doctests, `::` blocks, commented-out code, pragmas
+(`# noqa`, `# type:`…) and shebangs are left out. Definitions, imports and the
+module's dotted path count as marked-up names, so `ShardStore` becomes an
+entity wherever prose mentions it. A file that is not valid Python is skipped
+with the line it failed on. The parser is the standard library's `ast` and
+`tokenize`, so there are still no dependencies.
 
 ## The ontology is a file
 

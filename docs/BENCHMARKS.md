@@ -20,7 +20,7 @@ two things: **was the answer right**, and **what did it cost**.
 
 ## Method
 
-**Corpus.** This repository's own Markdown: 12 files, 798 claims. It is real
+**Corpus.** This repository's own Markdown: 12 files, 804 claims. It is real
 documentation written to explain the project, not text written for the test.
 `docs/BENCHMARKS.md` itself is excluded, because it quotes the questions.
 Every result records a fingerprint of the exact files it ran on.
@@ -53,7 +53,7 @@ with a fresh walker per question and with the questions reversed.
 
 ## Results
 
-Corpus `d07e20b7c148994e`: 12 files, 798 claims, 26,875 tokens. 32 answerable
+Corpus `e7ca20d037881e85`: 12 files, 804 claims, 27,083 tokens. 32 answerable
 questions, 29 covered, 8 out of scope.
 
 | Method | Correct | Of covered | Mean tokens / question | Out-of-scope refused |
@@ -62,9 +62,9 @@ questions, 29 covered, 8 out of scope.
 | BM25 top-1 | 17/32 (53%) | 17/29 (59%) | 26 | 3/8 |
 | BM25 top-3 | 22/32 (69%) | 22/29 (76%) | 91 | 3/8 |
 | BM25 top-5 | 22/32 (69%) | 22/29 (76%) | 152 | 3/8 |
-| Read everything | 29/32 (91%) | 29/29 (100%) | 26,875 | 0/8 |
+| Read everything | 29/32 (91%) | 29/29 (100%) | 27,083 | 0/8 |
 
-The README's "flat" figure averaged 7,844 tokens on the same questions.
+The README's "flat" figure averaged about 7,840 tokens on the same questions.
 
 ## What it says
 
@@ -94,6 +94,39 @@ What the walk does have that BM25 does not is the path: every answer comes with
 the typed chain that justifies it, and the provenance, invalidation and
 time-travel machinery behind that. This benchmark doesn't score any of that.
 It scores only whether the right sentence comes back, and at what token cost.
+
+## Code suite
+
+`python -m contextmesh bench --suite bench/contextmesh-code.json` asks 18
+questions answered by the docstrings and comments of `contextmesh/`, plus 6
+out-of-scope ones. Corpus `7100f913821685b5`: 25 files, 977 claims.
+
+| Method | Correct | Mean tokens / question | Out-of-scope refused |
+|---|---|---|---|
+| Graph walk | 15/18 (83%) | 68 | 6/6 |
+| BM25 top-1 | 12/18 (67%) | 31 | 3/6 |
+| BM25 top-3 | 15/18 (83%) | 96 | 3/6 |
+| BM25 top-5 | 15/18 (83%) | 158 | 3/6 |
+| Read everything | 18/18 (100%) | 32,973 | 0/6 |
+
+Here the walk beats one keyword result, matches three at about 70% of the
+cost, and refuses every out-of-scope question.
+
+Read it with a heavier caveat than the docs suite. These questions were
+written by sampling the extracted claims, so every answer is in a claim by
+construction (18/18 coverage). They lean toward sentences the extractor keeps,
+and toward the distinctive vocabulary of docstrings, which suits both methods.
+The docs suite, written from the documents rather than from the claims, is the
+fairer of the two.
+
+Suites name the file types they cover (`corpus.suffixes`), so the docs suite
+still reads only Markdown and text now that `.py` files are read by default.
+Code ingestion did not change its results. Its fingerprint moves only when the
+repo's Markdown does.
+
+The code suite's corpus is this project's own source, so its fingerprint moves
+with almost every code change. Numbers are always reported with the
+fingerprint they ran on.
 
 ## Limits
 
