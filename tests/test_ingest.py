@@ -20,6 +20,7 @@ from contextmesh.ingest import (
     HIGH,
     LOW,
     MEDIUM,
+    PROSE_SUFFIXES,
     IngestError,
     _read_bounded,
     _Unreadable,
@@ -27,6 +28,7 @@ from contextmesh.ingest import (
     claim_assumption_statement,
     discover_entities,
     parse_markdown,
+    parse_python,
     read_folder,
     source_id_for,
 )
@@ -203,6 +205,245 @@ class EncodingAndTimeTest(unittest.TestCase):
         self.assertRegex(built.ingested_at, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertEqual(built.summary()["ingested_at"], built.ingested_at)
         self.assertNotIn(built.ingested_at, built.graph.to_json())
+
+
+PY_SOURCE = '''#!/usr/bin/env python3
+"""Shard storage for the Index Builder.
+
+The Shard Store keeps every shard it is given.
+
+Example::
+
+    store = ShardStore()
+    store.put(shard)
+"""
+
+import hashlib  # noqa: F401
+from pathlib import Path
+
+#: How many times a failed write is retried before it gives up.
+RETRIES = 3
+
+
+class ShardStore:
+    """Keeps shards on disk, one file per shard.
+
+    - Writes are atomic.
+    - Reads never block a writer.
+
+    >>> ShardStore().count()
+    0
+    """
+
+    def put(self, shard):
+        """Store one shard and return its key."""
+        # The key is the content hash, so a repeated write is a no-op.
+        key = hashlib.sha256(shard).hexdigest()  # stable across processes
+        # value = self.cache[key]
+        return key
+
+    def _private(self):
+        """Not part of the documented surface."""
+'''
+
+
+class PythonParsingTest(unittest.TestCase):
+    """Code files contribute their docstrings and comments, never their code."""
+
+    def setUp(self):
+        self.parsed = parse_python("store/shards.py", PY_SOURCE)
+
+    def prose(self):
+        return [
+            (b.kind, b.symbol, " ".join(self.parsed.clean[b.start:b.end].split()))
+            for b in self.parsed.blocks
+        ]
+
+    def test_blanking_preserves_every_offset(self):
+        self.assertEqual(len(self.parsed.clean), len(self.parsed.raw))
+        for raw_ch, clean_ch in zip(self.parsed.raw, self.parsed.clean):
+            if raw_ch == "\n":
+                self.assertEqual(clean_ch, "\n")
+
+    def test_docstrings_and_comments_are_prose_and_code_is_not(self):
+        texts = [t for _, _, t in self.prose()]
+        self.assertIn("The Shard Store keeps every shard it is given.", texts)
+        self.assertIn("Store one shard and return its key.", texts)
+        self.assertIn(
+            "The key is the content hash, so a repeated write is a no-op.", texts
+        )
+        joined = " ".join(texts)
+        for code in ("hexdigest", "import hashlib", "return key", "RETRIES = 3"):
+            self.assertNotIn(code, joined)
+
+    def test_blocks_name_the_definition_they_document(self):
+        by_text = {t: (kind, symbol) for kind, symbol, t in self.prose()}
+        self.assertEqual(
+            by_text["Store one shard and return its key."], ("docstring", "ShardStore.put")
+        )
+        self.assertEqual(
+            by_text["The key is the content hash, so a repeated write is a no-op."],
+            ("comment", "ShardStore.put"),
+        )
+        self.assertEqual(by_text["The Shard Store keeps every shard it is given."][1], "")
+
+    def test_pragmas_shebangs_examples_and_commented_out_code_are_not_prose(self):
+        joined = " ".join(t for _, _, t in self.prose())
+        for not_prose in ("noqa", "usr/bin", "store.put(shard)", ">>>", "self.cache[key]"):
+            self.assertNotIn(not_prose, joined)
+
+    def test_list_items_and_attribute_comments_read_cleanly(self):
+        texts = [t for _, _, t in self.prose()]
+        self.assertIn("Writes are atomic.", texts)
+        self.assertIn("Reads never block a writer.", texts)
+        self.assertIn("How many times a failed write is retried before it gives up.", texts)
+
+    def test_distinctive_definitions_and_the_module_are_marked_names(self):
+        for name in ("store.shards", "ShardStore", "ShardStore.put"):
+            self.assertIn(name, self.parsed.marked)
+        # A plain lowercase word ("put") or a standard-library import
+        # ("hashlib", "Path") would become a hub entity matching every prose
+        # use of the word; private names are not documented surface.
+        for name in ("put", "hashlib", "Path", "_private"):
+            self.assertNotIn(name, self.parsed.marked)
+        self.assertEqual(self.parsed.title, "Shard storage for the Index Builder.")
+
+    def test_only_project_imports_are_marked(self):
+        parsed = parse_python(
+            "a.py", "from .graph import ContextGraph, build\nfrom json import JSONDecoder\n"
+        )
+        self.assertIn("ContextGraph", parsed.marked)
+        self.assertNotIn("build", parsed.marked)
+        self.assertNotIn("JSONDecoder", parsed.marked)
+
+    def test_prose_after_a_literal_block_at_the_same_indent_is_kept(self):
+        source = '''class A:
+    def f(self):
+        """Run the job.
+
+        Use it like this::
+
+            run(job)
+
+        The job retries three times before it gives up.
+
+        Note::
+
+        This paragraph is not indented under the colons.
+        """
+'''
+        parsed = parse_python("a.py", source)
+        texts = [" ".join(parsed.clean[b.start:b.end].split()) for b in parsed.blocks]
+        self.assertIn("The job retries three times before it gives up.", texts)
+        self.assertIn("This paragraph is not indented under the colons.", texts)
+        self.assertNotIn("run(job)", texts)
+
+    def test_spans_point_at_the_file(self):
+        raw = self.parsed.raw
+        for block in self.parsed.blocks:
+            text = " ".join(self.parsed.clean[block.start:block.end].split())
+            first_word = text.split()[0]
+            self.assertIn(first_word, raw[block.start:block.end], block)
+
+    def test_non_ascii_source_keeps_offsets_true(self):
+        # ast reports columns in UTF-8 bytes; "é" before a docstring on the
+        # same line shifts a byte offset off the character it names.
+        source = 'def f(x="é"): """The café opens at nine every day."""\n'
+        parsed = parse_python("cafe.py", source)
+        block = parsed.blocks[0]
+        self.assertEqual(
+            parsed.raw[block.start:block.end], "The café opens at nine every day."
+        )
+        comment = parse_python("c.py", 'x = "é"  # The café opens at nine every day.\n')
+        block = comment.blocks[0]
+        self.assertEqual(
+            comment.raw[block.start:block.end], "The café opens at nine every day."
+        )
+
+    def test_a_docstring_paragraph_that_is_code_is_not_prose(self):
+        source = '''def f():
+    """Combine two shards into one.
+
+    merged = combine(left, right)
+    """
+'''
+        texts = [
+            " ".join(parse_python("m.py", source).clean[b.start:b.end].split())
+            for b in parse_python("m.py", source).blocks
+        ]
+        self.assertEqual(texts, ["Combine two shards into one."])
+
+    def test_invalid_python_is_refused_with_its_line(self):
+        with self.assertRaises(_Unreadable) as caught:
+            parse_python("broken.py", "def f(:\n    pass\n")
+        self.assertIn("not valid Python (line 1)", str(caught.exception))
+
+
+class CodeFolderTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        _write(self.root, "store/shards.py", PY_SOURCE)
+        _write(self.root, "README.md", "# Store\n\nThe ShardStore keeps shards on disk.\n")
+        _write(self.root, "broken.py", "def f(:\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_a_folder_build_reads_code_and_locates_claims_in_it(self):
+        built = build_folder(self.root)
+        self.assertIn(("broken.py", "not valid Python (line 1)"),
+                      [(s.path, s.reason) for s in built.skipped])
+        claim = next(
+            n for n in built.graph.nodes.values()
+            if n.type is NodeType.CLAIM and n.label == "Store one shard and return its key."
+        )
+        self.assertEqual(claim.attrs["path"], "store/shards.py")
+        self.assertEqual(claim.attrs["symbol"], "ShardStore.put")
+        self.assertEqual(claim.attrs["block"], "docstring")
+        self.assertEqual(claim.attrs["confidence"], HIGH)
+        line = PY_SOURCE.splitlines()[claim.attrs["line_start"] - 1]
+        self.assertIn("Store one shard and return its key.", line)
+
+    def test_comments_are_graded_below_docstrings(self):
+        built = build_folder(self.root)
+        comment = next(
+            n for n in built.graph.nodes.values()
+            if n.type is NodeType.CLAIM and n.attrs.get("block") == "comment"
+            and "content hash" in n.label
+        )
+        self.assertEqual(comment.attrs["confidence"], MEDIUM)
+
+    def test_a_definition_named_in_prose_becomes_an_entity(self):
+        built = build_folder(self.root)
+        self.assertIsNotNone(built.resolver.match("ShardStore"))
+
+    def test_generic_code_names_do_not_become_hub_entities(self):
+        _write(self.root, "notes.md", "# Notes\n\nYou put the file in the store.\n"
+                                      "Then put it back and read the hashlib docs.\n")
+        built = build_folder(self.root)
+        labels = {n.label.lower() for n in built.graph.nodes.values()
+                  if n.type is NodeType.ENTITY}
+        for generic in ("put", "hashlib", "path"):
+            self.assertNotIn(generic, labels)
+
+    def test_code_can_be_left_out(self):
+        built = build_folder(self.root, suffixes=PROSE_SUFFIXES)
+        self.assertEqual([f.path for f in built.files], ["README.md"])
+
+    def test_a_refresh_retires_a_changed_docstring(self):
+        from contextmesh.refresh import refresh_folder
+
+        built = build_folder(self.root)
+        _write(self.root, "store/shards.py",
+               PY_SOURCE.replace("Store one shard and return its key.",
+                                 "Store one shard and return its content key."))
+        report = refresh_folder(built.graph, built.resolver, built.ledger, self.root)
+        self.assertEqual(report.files["changed"], ["store/shards.py"])
+        live = {n.label for n in built.graph.nodes.values()
+                if n.type is NodeType.CLAIM and n.live}
+        self.assertIn("Store one shard and return its content key.", live)
+        self.assertNotIn("Store one shard and return its key.", live)
 
 
 class PathologicalInputTest(unittest.TestCase):

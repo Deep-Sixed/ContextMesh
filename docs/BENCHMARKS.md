@@ -20,7 +20,7 @@ two things: **was the answer right**, and **what did it cost**.
 
 ## Method
 
-**Corpus.** This repository's own Markdown: 12 files, 798 claims. It is real
+**Corpus.** This repository's own Markdown: 12 files, 805 claims. It is real
 documentation written to explain the project, not text written for the test.
 `docs/BENCHMARKS.md` itself is excluded, because it quotes the questions.
 Every result records a fingerprint of the exact files it ran on.
@@ -53,23 +53,23 @@ with a fresh walker per question and with the questions reversed.
 
 ## Results
 
-Corpus `d07e20b7c148994e`: 12 files, 798 claims, 26,875 tokens. 32 answerable
+Corpus `92c57aeb78f8236b`: 12 files, 805 claims, 27,147 tokens. 32 answerable
 questions, 29 covered, 8 out of scope.
 
 | Method | Correct | Of covered | Mean tokens / question | Out-of-scope refused |
 |---|---|---|---|---|
-| Graph walk | 17/32 (53%) | 17/29 (59%) | 62 | 5/8 |
+| Graph walk | 17/32 (53%) | 17/29 (59%) | 60 | 5/8 |
 | BM25 top-1 | 17/32 (53%) | 17/29 (59%) | 26 | 3/8 |
 | BM25 top-3 | 22/32 (69%) | 22/29 (76%) | 91 | 3/8 |
-| BM25 top-5 | 22/32 (69%) | 22/29 (76%) | 152 | 3/8 |
-| Read everything | 29/32 (91%) | 29/29 (100%) | 26,875 | 0/8 |
+| BM25 top-5 | 22/32 (69%) | 22/29 (76%) | 151 | 3/8 |
+| Read everything | 29/32 (91%) | 29/29 (100%) | 27,147 | 0/8 |
 
-The README's "flat" figure averaged 7,844 tokens on the same questions.
+The README's "flat" figure averaged about 7,840 tokens on the same questions.
 
 ## What it says
 
 - **Against a real retriever, the token advantage is gone.** The walk spends
-  about 62 tokens per question; BM25 top-1 spends 26 for the same number of
+  about 60 tokens per question; BM25 top-1 spends 26 for the same number of
   correct answers. BM25 top-3 gets 5 more questions right for 91 tokens.
   "Roughly 120× fewer tokens" was a comparison with padding, not with search.
 - **Accuracy is the same as one keyword search.** The walk and BM25 top-1
@@ -81,7 +81,7 @@ The README's "flat" figure averaged 7,844 tokens on the same questions.
   have refused, and it never refused an in-scope question, even the 12 covered
   ones it got wrong. A wrong answer comes back looking like a right one, with
   a path.
-- **Reading everything is the only way to reach the ceiling,** at about 430
+- **Reading everything is the only way to reach the ceiling,** at about 450
   times the walk's cost.
 - **The extractor loses answers before retrieval starts.** 3 of 32 questions
   have no correct claim at all:
@@ -94,6 +94,50 @@ What the walk does have that BM25 does not is the path: every answer comes with
 the typed chain that justifies it, and the provenance, invalidation and
 time-travel machinery behind that. This benchmark doesn't score any of that.
 It scores only whether the right sentence comes back, and at what token cost.
+
+## Code suite
+
+`python -m contextmesh bench --suite bench/contextmesh-code.json` asks 18
+questions answered by the docstrings and comments of `contextmesh/`, plus 6
+out-of-scope ones. Corpus `843be1ee936a360c`: 25 files, 980 claims.
+
+| Method | Correct | Mean tokens / question | Out-of-scope refused |
+|---|---|---|---|
+| Graph walk | 13/18 (72%) | 77 | 6/6 |
+| BM25 top-1 | 12/18 (67%) | 31 | 2/6 |
+| BM25 top-3 | 15/18 (83%) | 96 | 2/6 |
+| BM25 top-5 | 15/18 (83%) | 158 | 2/6 |
+| Read everything | 18/18 (100%) | 33,134 | 0/6 |
+
+The walk beats one keyword result by one question, trails three, and refuses
+every out-of-scope question. BM25 refuses two.
+
+**An earlier run showed the walk at 15/18, and the difference is worth
+keeping on record.** That run treated every function name and every import as
+a marked-up name, so generic words became entities: `field` (from
+`dataclasses.field`), `read`, `json`, `graph`. Two answers were right only
+through those hubs. "Is a stored ledger digest regenerated on load?" was
+reached through `field`, because the answer says "not a *field* to be
+regenerated". Code names are now marked only when they are distinctive as
+written (dotted, snake_case, capitalised, or imported from the project), so
+those false links and those two lucky answers are gone.
+
+Read this suite with two caveats beyond the docs suite's:
+
+- **Its questions were written by sampling the extracted claims.** Every
+  answer is in a claim by construction (18/18 coverage), and the questions
+  lean toward the sentences and vocabulary the extractor keeps. The docs
+  suite, written from the documents, is the fairer of the two.
+- **Its corpus is this project's own source, so it moves with the code.**
+  Adding a docstring that says "with a capital" was enough to make BM25 stop
+  refusing "What is the capital of Australia?". Compare methods within one
+  run, where they all see the same corpus, rather than across runs. Numbers
+  are always reported with the fingerprint they ran on.
+
+Suites name the file types they cover (`corpus.suffixes`), so the docs suite
+still reads only Markdown and text now that `.py` files are read by default.
+Code ingestion did not change its results. Its fingerprint moves only when the
+repo's Markdown does.
 
 ## Limits
 

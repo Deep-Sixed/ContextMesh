@@ -1,0 +1,37 @@
+{
+  "name": "contextmesh-code",
+  "about": "Questions answered by the docstrings and comments of this repository's own Python source (contextmesh/). Each answerable question names the file a correct answer comes from and phrases it contains; out-of-scope questions should be refused.",
+  "corpus": {
+    "root": "../contextmesh",
+    "suffixes": [".py"],
+    "exclude": ["bench.py"]
+  },
+  "answerable": [
+    {"q": "What can reject an assumption?", "paths": ["assumptions.py"], "any": ["evidence that contradicts"]},
+    {"q": "Why is a slug id not proof of identity?", "paths": ["graph.py"], "any": ["truncates its digest"]},
+    {"q": "When does an edge survive an as-of projection?", "paths": ["temporal.py"], "any": ["both of its endpoints"]},
+    {"q": "Why are routes through a source that every claim derives from priced up?", "paths": ["traverse.py"], "any": ["cheap bridge"]},
+    {"q": "Where are the numbers the dashboard renders computed?", "paths": ["metrics.py"], "any": ["computed here"]},
+    {"q": "What does a name that already resolves to a known entity get registered as?", "paths": ["pipeline.py"], "any": ["alias"]},
+    {"q": "Is a decision ever revived when invalidated work is redone?", "paths": ["execute.py"], "any": ["never revived"]},
+    {"q": "Does TaskRegistry.describe expose module paths or callables?", "paths": ["execute.py"], "any": ["keys only"]},
+    {"q": "Why does parse_date refuse loose dates like March?", "paths": ["temporal.py"], "any": ["silently decide"]},
+    {"q": "Why is the evidence intake boundary the last place to use a truncated digest?", "paths": ["evidence.py"], "any": ["untrusted, high-volume"]},
+    {"q": "How much memory did counting every run of words cost per MB of text?", "paths": ["ingest.py"], "any": ["130 mb"]},
+    {"q": "Which edges does refreshing never touch when linking new entities?", "paths": ["refresh.py"], "any": ["never touched"]},
+    {"q": "What does the bundled corpus give the pipeline that a real folder lacks?", "paths": ["ingest.py"], "any": ["entity names, relation hints"]},
+    {"q": "Why do useful backward reversals of an edge land on a claim or a decision?", "paths": ["traverse.py"], "any": ["who said this"]},
+    {"q": "Is the telemetry projection mutable?", "paths": ["telemetry.py"], "any": ["deeply immutable"]},
+    {"q": "Is a stored ledger digest regenerated on load?", "paths": ["execute.py"], "any": ["evidence, not a field"]},
+    {"q": "How many bytes does reading one file allow at most?", "paths": ["ingest.py"], "any": ["max_bytes"]},
+    {"q": "Why is a source whose retrieved_at will not parse reported rather than hidden?", "paths": ["reconstruct.py"], "any": ["horizon look sharper"]}
+  ],
+  "out_of_scope": [
+    "What is the refund policy for annual plans?",
+    "Who won the 2018 World Cup?",
+    "What is the capital of Australia?",
+    "How do I configure Kubernetes autoscaling for a web service?",
+    "What is the recommended dose of ibuprofen?",
+    "When is the team offsite in Lisbon?"
+  ]
+}

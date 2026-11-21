@@ -3,6 +3,7 @@
   "about": "Questions over this repository's own Markdown. Each answerable question names the file(s) a correct answer comes from and phrases a correct answer contains; out-of-scope questions should be refused.",
   "corpus": {
     "root": "..",
+    "suffixes": [".md", ".markdown", ".mdx", ".txt", ".rst", ".text"],
     "exclude": ["docs/BENCHMARKS.md"]
   },
   "answerable": [
