@@ -1,0 +1,52 @@
+{
+  "name": "contextmesh-docs",
+  "about": "Questions over this repository's own Markdown. Each answerable question names the file(s) a correct answer comes from and phrases a correct answer contains; out-of-scope questions should be refused.",
+  "corpus": {
+    "root": "..",
+    "exclude": ["docs/BENCHMARKS.md"]
+  },
+  "answerable": [
+    {"q": "What threshold does entity resolution use?", "paths": ["docs/ARCHITECTURE.md"], "any": ["0.62"]},
+    {"q": "Why is the entity resolution threshold set so high?", "paths": ["docs/ARCHITECTURE.md"], "any": ["wrong merge"]},
+    {"q": "Are version numbers stripped when names are normalised?", "paths": ["docs/ARCHITECTURE.md"], "any": ["version numbers", "v2 encoder"]},
+    {"q": "Which edges carry invalidation backwards?", "paths": ["docs/ARCHITECTURE.md", "GRAPH.md", "README.md"], "any": ["depends_on", "derived_from"]},
+    {"q": "Do mentions edges propagate invalidation?", "paths": ["docs/ARCHITECTURE.md", "GRAPH.md", "README.md"], "any": ["mentions"]},
+    {"q": "Is anything deleted when an assumption is rejected?", "paths": ["docs/ARCHITECTURE.md", "README.md"], "any": ["nothing is deleted", "stay in the graph"]},
+    {"q": "How many tokens is a word counted as?", "paths": ["docs/ARCHITECTURE.md"], "any": ["1.3"]},
+    {"q": "How many reasons can a dead end give?", "paths": ["README.md", "docs/ARCHITECTURE.md"], "any": ["four"]},
+    {"q": "What is the PyPI distribution name?", "paths": ["RELEASE_NOTES.md"], "any": ["contextmesh-graph"]},
+    {"q": "Which Python version does the MCP extra require?", "paths": ["RELEASE_NOTES.md"], "any": ["3.10"]},
+    {"q": "Is a PyPI API token stored in the repository?", "paths": ["RELEASE_NOTES.md"], "any": ["trusted publishing", "no long-lived"]},
+    {"q": "How should a security vulnerability be reported?", "paths": ["SECURITY.md"], "any": ["private vulnerability", "security advisory"]},
+    {"q": "Which security reports are treated as release blockers?", "paths": ["SECURITY.md"], "any": ["release blockers"]},
+    {"q": "Which HTTP failures does the LLM adapter retry?", "paths": ["docs/PR9_NATIVE_LLM_PROVIDERS.md"], "any": ["429", "5xx"]},
+    {"q": "Can a live LLM client carry a simulator callback?", "paths": ["docs/PR9_NATIVE_LLM_PROVIDERS.md"], "any": ["simulator callback"]},
+    {"q": "Is an API key allowed in simulation mode?", "paths": ["docs/PR9_NATIVE_LLM_PROVIDERS.md"], "any": ["api key is refused"]},
+    {"q": "Are provider credentials shown in repr output?", "paths": ["docs/PR9_NATIVE_LLM_PROVIDERS.md"], "any": ["repr"]},
+    {"q": "Can MCP input become an import or a callable?", "paths": ["docs/PR8_CONTROLLED_WRITES.md"], "any": ["never becomes an import"]},
+    {"q": "Is the RunLedger cryptographically authenticated?", "paths": ["docs/PR8_CONTROLLED_WRITES.md"], "any": ["not cryptographically authenticated"]},
+    {"q": "What happens to the served session when a controlled write fails validation?", "paths": ["docs/PR8_CONTROLLED_WRITES.md"], "any": ["previously served session authoritative"]},
+    {"q": "What typeface does the dashboard use?", "paths": ["docs/DASHBOARD_SPEC.md"], "any": ["monospace"]},
+    {"q": "What is an assumption rejected by?", "paths": ["GRAPH.md", "README.md"], "any": ["evidence that contradicts"]},
+    {"q": "Does a supersedes edge delete anything?", "paths": ["GRAPH.md"], "any": ["never deletes"]},
+    {"q": "Is a decision content-addressed?", "paths": ["GRAPH.md"], "any": ["never content-addressed"]},
+    {"q": "Is there a way to create an edge without a type?", "paths": ["GRAPH.md"], "any": ["no constructor"]},
+    {"q": "Is a file skipped for its size treated as deleted during a refresh?", "paths": ["README.md", "docs/PHASE2_INCREMENTAL_REBUILDS.md"], "any": ["left as it was", "never treated as deleted", "left_as_is"]},
+    {"q": "How is the retirement of a deleted file dated during a refresh?", "paths": ["README.md", "docs/PHASE2_INCREMENTAL_REBUILDS.md"], "any": ["as-of", "undated"]},
+    {"q": "How much memory does a folder build need per MB of text?", "paths": ["README.md", "docs/PHASE2_INCREMENTAL_REBUILDS.md"], "any": ["350 mb"]},
+    {"q": "Which text encodings can folder ingestion read?", "paths": ["README.md"], "any": ["utf-16"]},
+    {"q": "What happens to a sentence that returns after it was removed from a file?", "paths": ["README.md", "docs/PHASE2_INCREMENTAL_REBUILDS.md"], "any": ["supersedes", "new claim"]},
+    {"q": "What is the default total size limit for a folder build?", "paths": ["README.md"], "any": ["4 mb"]},
+    {"q": "Does the core package have runtime dependencies?", "paths": ["RELEASE_NOTES.md", "README.md"], "any": ["no runtime dependencies", "no dependencies"]}
+  ],
+  "out_of_scope": [
+    "What is the refund policy for annual plans?",
+    "Who won the 2018 World Cup?",
+    "How do I configure Kubernetes autoscaling for a web service?",
+    "What is the capital of Australia?",
+    "Which SQL index should the billing table use?",
+    "How much does the enterprise plan cost per seat?",
+    "What is the recommended dose of ibuprofen?",
+    "When is the team offsite in Lisbon?"
+  ]
+}

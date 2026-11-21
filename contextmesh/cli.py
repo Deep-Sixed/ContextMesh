@@ -28,6 +28,7 @@ from .model import AssumptionStatus, NodeType
 
 DEFAULT_EXPORT = Path(__file__).resolve().parent.parent / "dashboard" / "data" / "mesh.json"
 DASHBOARD_HTML = Path(__file__).resolve().parent.parent / "dashboard" / "index.html"
+DEFAULT_SUITE = Path(__file__).resolve().parent.parent / "bench" / "contextmesh-docs.json"
 
 RULE = "─" * 78
 
@@ -240,6 +241,23 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bench(args: argparse.Namespace) -> int:
+    from .bench import load_suite, render
+    from .bench import run as run_bench
+
+    suite_path = Path(args.suite)
+    if not suite_path.is_file():
+        print(f"contextmesh: no benchmark suite at {suite_path}; pass --suite FILE",
+              file=sys.stderr)
+        return 2
+    result = run_bench(load_suite(suite_path), base=suite_path.parent)
+    if args.json:
+        Path(args.json).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n",
+                                   encoding="utf-8")
+    print(render(result))
+    return 0
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     result = _source_graph(args)
     for question in args.question:
@@ -449,6 +467,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     health.add_argument("--folder", metavar="DIR", help=folder_help)
     health.add_argument("--max-total-mb", type=_megabytes, metavar="MB", help=cap_help)
     health.set_defaults(func=cmd_health)
+    bench = sub.add_parser(
+        "bench", help="score answers on labelled questions: graph walk vs BM25 vs reading all"
+    )
+    bench.add_argument("--suite", default=str(DEFAULT_SUITE),
+                       help="benchmark suite JSON (default: this repo's docs suite)")
+    bench.add_argument("--json", metavar="FILE", help="also write the full result as JSON")
+    bench.set_defaults(func=cmd_bench)
     ingest = sub.add_parser("ingest", help="build a graph from your own files and report it")
     ingest.add_argument("folder", metavar="DIR")
     ingest.add_argument("--json", action="store_true", help="machine-readable summary")
