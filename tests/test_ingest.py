@@ -1,5 +1,6 @@
 """Folder ingestion: real files in, located and graded claims out."""
 
+import hashlib
 import io
 import json
 import os
@@ -12,7 +13,9 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from contextmesh import cli
+from contextmesh.decisions import DecisionLog
 from contextmesh.ingest import (
+    CLAIM_ASSUMPTION_AUTHOR,
     DEFAULT_MAX_TOTAL_BYTES,
     HIGH,
     LOW,
@@ -21,12 +24,13 @@ from contextmesh.ingest import (
     _read_bounded,
     _Unreadable,
     build_folder,
+    claim_assumption_statement,
     discover_entities,
     parse_markdown,
     read_folder,
     source_id_for,
 )
-from contextmesh.model import NodeType
+from contextmesh.model import AssumptionStatus, EdgeType, NodeType, Provenance
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -57,6 +61,16 @@ POLICY = """# Retention Policy
 The Retention Policy keeps shards for thirty days because audits look back a month.
 The Index Builder reads the Retention Policy before it deletes anything.
 """
+
+
+def _source_for(built, rel: str):
+    """The source node for the (only) version of ``rel`` in a fresh build."""
+    found = [
+        n for n in built.graph.nodes.values()
+        if n.type is NodeType.SOURCE and n.attrs.get("path") == rel
+    ]
+    assert len(found) == 1, (rel, [n.id for n in found])
+    return found[0]
 
 
 def _write(root: Path, name: str, text: str) -> Path:
@@ -123,7 +137,7 @@ class EncodingAndTimeTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _source(self, built, rel):
-        return built.graph.nodes[source_id_for(rel)]
+        return _source_for(built, rel)
 
     def test_utf16_with_a_bom_is_read_and_located(self):
         (self.root / "le.md").write_bytes(b"\xff\xfe" + self.WINDOWS_NOTE.encode("utf-16-le"))
@@ -231,7 +245,12 @@ class ClaimProvenanceTest(FolderFixture):
             self.assertEqual(attrs["extraction"], "verbatim-rule")
             self.assertIs(attrs["verified"], False)
             self.assertIn(attrs["confidence"], (HIGH, MEDIUM, LOW))
-            self.assertEqual(claim.provenance.source_id, source_id_for(attrs["path"]))
+            source = built.graph.nodes[claim.provenance.source_id]
+            self.assertEqual(source.attrs["path"], attrs["path"])
+            self.assertEqual(
+                claim.provenance.source_id,
+                source_id_for(attrs["path"], source.attrs["sha256"]),
+            )
             self.assertEqual(
                 attrs["location"].split(":")[0], attrs["path"]
             )
@@ -267,19 +286,130 @@ class ClaimProvenanceTest(FolderFixture):
         self.assertEqual(item.attrs["confidence"], MEDIUM)
 
     def test_no_relation_edges_are_invented(self):
+        # Nothing interprets the text: no claim contradicts, supersedes,
+        # supports or cites another. The only depends_on edges are each
+        # claim's own "file still says" assumption.
         built = build_folder(self.root)
-        invented = {"contradicts", "supersedes", "supports", "depends_on", "cites"}
+        invented = {"contradicts", "supersedes", "supports", "cites"}
         self.assertFalse(
             [e for e in built.graph.edges.values() if e.type.value in invented]
         )
+        for edge in built.graph.edges.values():
+            if edge.type.value != "depends_on":
+                continue
+            self.assertIs(built.graph.nodes[edge.src].type, NodeType.CLAIM)
+            self.assertIs(built.graph.nodes[edge.dst].type, NodeType.ASSUMPTION)
 
-    def test_a_repeated_sentence_keeps_its_first_location(self):
+    def test_a_sentence_in_two_files_is_two_located_claims(self):
+        # Claims are scoped to their file, so one file can stop saying a
+        # sentence without retiring the other file's copy.
         _write(self.root, "zcopy.md", POLICY)
         built = build_folder(self.root)
         sentence = "The Index Builder reads the Retention Policy before it deletes anything."
-        claim = next(c for c in self.claims(built) if c.label == sentence)
-        self.assertEqual(claim.provenance.source_id, source_id_for("policy.md"))
-        self.assertEqual(claim.attrs["path"], "policy.md")
+        claims = [c for c in self.claims(built) if c.label == sentence]
+        self.assertEqual(sorted(c.attrs["path"] for c in claims), ["policy.md", "zcopy.md"])
+        self.assertEqual(len({c.id for c in claims}), 2)
+        for claim in claims:
+            source = built.graph.nodes[claim.provenance.source_id]
+            self.assertEqual(source.attrs["path"], claim.attrs["path"])
+
+
+class ClaimAssumptionTest(FolderFixture):
+    """Phase 2, slice 1: each claim rests on its file still saying it."""
+
+    def _assumption_of(self, built, claim):
+        deps = built.graph.out_edges(claim.id, [EdgeType.DEPENDS_ON])
+        self.assertEqual(len(deps), 1, claim.id)
+        return built.graph.assumptions[deps[0].dst]
+
+    def test_every_claim_rests_on_its_own_file_still_saying_it(self):
+        built = build_folder(self.root)
+        claims = self.claims(built)
+        seen = set()
+        for claim in claims:
+            assumption = self._assumption_of(built, claim)
+            source = built.graph.nodes[claim.provenance.source_id]
+            self.assertEqual(
+                assumption.statement,
+                claim_assumption_statement(
+                    source.attrs["path"], source.attrs["sha256"], claim.label
+                ),
+            )
+            self.assertIs(assumption.status, AssumptionStatus.ACTIVE)
+            self.assertEqual(assumption.created_by, CLAIM_ASSUMPTION_AUTHOR)
+            # Not embedded: its text duplicates the claim's.
+            self.assertIsNone(built.graph.nodes[assumption.id].embedding)
+            seen.add(assumption.id)
+        self.assertEqual(len(seen), len(claims))
+
+    def test_sources_are_versions_named_by_content_hash(self):
+        built = build_folder(self.root)
+        raw = (self.root / "policy.md").read_bytes()
+        source = _source_for(built, "policy.md")
+        self.assertEqual(source.attrs["sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(source.attrs["size_bytes"], len(raw))
+        self.assertEqual(source.id, source_id_for("policy.md", source.attrs["sha256"]))
+
+        _write(self.root, "policy.md", POLICY + "The Retention Policy is reviewed each quarter.\n")
+        changed = _source_for(build_folder(self.root), "policy.md")
+        self.assertNotEqual(changed.id, source.id)
+
+    def test_rejecting_one_claims_assumption_retires_only_what_stood_on_it(self):
+        # The mechanism a refresh will use: evidence that the file no longer
+        # says a sentence rejects that claim's assumption. The claim and the
+        # decision derived from it fall; a sibling claim from the same file,
+        # and a decision on it, stand.
+        built = build_folder(self.root)
+        graph = built.graph
+        by_label = {c.label: c for c in self.claims(built)}
+        gone = by_label["The Retention Policy keeps shards for thirty days because "
+                        "audits look back a month."]
+        kept = by_label["The Index Builder reads the Retention Policy before it "
+                        "deletes anything."]
+        source_id = gone.provenance.source_id
+
+        decisions = DecisionLog(graph)
+        on_gone = decisions.decide(
+            "Keep thirty days of shards", "Audits look back a month.",
+            source_id=source_id, supported_by=[gone.id],
+        )
+        on_kept = decisions.decide(
+            "Gate deletion on the policy", "The builder checks before deleting.",
+            source_id=source_id, supported_by=[kept.id],
+        )
+        evidence = graph.add_node(
+            NodeType.EVIDENCE,
+            "policy.md re-read: the thirty-day sentence is no longer present",
+            attrs={"kind": "file-reread"},
+            provenance=Provenance(source_id=source_id, extractor="test"),
+        )
+        report = built.ledger.reject(
+            self._assumption_of(built, gone).id, evidence_id=evidence.id
+        )
+
+        self.assertEqual(set(report.invalidated), {gone.id, on_gone.id})
+        self.assertFalse(graph.nodes[gone.id].live)
+        self.assertFalse(graph.nodes[on_gone.id].live)
+        self.assertTrue(graph.nodes[kept.id].live)
+        self.assertTrue(graph.nodes[on_kept.id].live)
+        self.assertTrue(graph.nodes[source_id].live)
+        self.assertIn("depends_on", report.why(gone.id))
+        self.assertIn("derived_from", report.why(on_gone.id))
+
+    def test_assumptions_survive_a_session_round_trip(self):
+        import argparse
+
+        from contextmesh_mcp.session import Session, add_source_arguments, open_session
+
+        parser = add_source_arguments(argparse.ArgumentParser())
+        session = open_session(parser.parse_args(["--folder", str(self.root)]))
+        target = Path(self._tmp.name) / "saved"
+        session.save(target)
+        restored = Session.load(target)
+        self.assertEqual(
+            sorted(session.graph.assumptions), sorted(restored.graph.assumptions)
+        )
+        self.assertEqual(session.graph.to_json(), restored.graph.to_json())
 
 
 class EntityDiscoveryTest(FolderFixture):
@@ -289,6 +419,22 @@ class EntityDiscoveryTest(FolderFixture):
         self.assertEqual(found.get("Index Builder"), HIGH)
         self.assertEqual(found.get("Retention Policy"), HIGH)
         self.assertEqual(found.get("shard_store"), HIGH)
+
+    def test_a_capitalised_phrase_never_crosses_a_sentence(self):
+        # "...the Shard Store.\nThe Index Builder..." once read as one name,
+        # and the resolver then folded both real names into it as aliases.
+        for rel in ("one.md", "two.md"):
+            _write(self.root, rel, "# Notes\n\nWrites go to the Shard Store.\n"
+                                   "The Index Builder reads them.\n")
+        _, files, _ = read_folder(self.root)
+        found = discover_entities(files)
+        self.assertIn("Shard Store", found)
+        self.assertIn("Index Builder", found)
+        self.assertFalse([name for name in found if "." in name], found)
+        built = build_folder(self.root)
+        store = built.resolver.match("Shard Store")
+        builder = built.resolver.match("Index Builder")
+        self.assertNotEqual(store[0], builder[0])
 
     def test_entity_nodes_carry_their_confidence(self):
         built = build_folder(self.root)

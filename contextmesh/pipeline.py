@@ -95,6 +95,18 @@ class Document:
     #: a list item or a paragraph never runs into the next one, and so markup
     #: it has blanked out is never part of a claim.
     segments: List[Tuple[int, int]] = field(default_factory=list)
+    #: When set, claim ids are scoped to it: ``slug("{scope}|{sentence}|0")``
+    #: instead of ``slug(sentence)``. A folder build scopes claims to their
+    #: file, so the same sentence in two files is two claims and one file can
+    #: stop saying it without retiring the other's. Empty for the bundled
+    #: corpus, whose ids are unchanged. The trailing ``0`` is the claim's
+    #: generation: a sentence that returns after being retired is a new claim.
+    claim_scope: str = ""
+    #: Optional override for claim ids, used when adding a document to a graph
+    #: that already holds earlier claims from the same file: returns the id a
+    #: sentence's claim should get, or ``None`` when the sentence is already a
+    #: live claim there and must not be extracted again.
+    claim_id_of: Optional[Callable[[str], Optional[str]]] = None
 
 
 #: ``annotate(doc, start, end, sentence)`` -> extra attrs for the claim lifted
@@ -150,6 +162,18 @@ class BuildReport:
         }
 
 
+def is_claim(sentence: str) -> bool:
+    """EXTRACT's test: a span becomes a claim only if it asserts something."""
+    return bool(_ASSERTIVE.search(sentence)) and len(sentence.split()) >= 4
+
+
+def claim_id_for(sentence: str, scope: str = "", generation: int = 0) -> str:
+    """The id a claim lifted from ``sentence`` gets; see ``Document.claim_scope``."""
+    if not scope:
+        return slug(sentence, NodeType.CLAIM.value)
+    return slug(f"{scope}|{sentence}|{generation}", NodeType.CLAIM.value)
+
+
 class Pipeline:
     """Builds a ContextGraph from documents, one stage at a time."""
 
@@ -165,6 +189,25 @@ class Pipeline:
         self.resolver = Resolver() if resolver is None else resolver
         self.prune_unwalked = prune_unwalked
         self.annotate = annotate
+
+    def register_entities(self, docs: Sequence[Document]) -> None:
+        """Seed the resolver with the entities each document declares.
+
+        A name that already resolves to a known entity is registered as an
+        alias of it — otherwise "PG Vector" would quietly become a second
+        pgvector. Idempotent, so a refresh can seed from every current file
+        before building only the changed ones.
+        """
+        for doc in docs:
+            for name in doc.entities:
+                existing = self.resolver.match(name)
+                if existing is not None:
+                    entity_id = existing[0]
+                    self.resolver.register(
+                        entity_id, self.resolver.canonical[entity_id], aliases=[name]
+                    )
+                    continue
+                self.resolver.register(slug(name, NodeType.ENTITY.value), name)
 
     # ── 01 CHUNK ─────────────────────────────────────────────────────────
     def chunk(self, doc: Document) -> List[Tuple[int, int, str]]:
@@ -219,19 +262,7 @@ class Pipeline:
         embed_stage = report.stage("EMBED")
         prune = report.stage("PRUNE")
 
-        # Seed the resolver with the entities each document declares. A name
-        # that already resolves to a known entity is registered as an alias of
-        # it — otherwise "PG Vector" would quietly become a second pgvector.
-        for doc in docs:
-            for name in doc.entities:
-                existing = self.resolver.match(name)
-                if existing is not None:
-                    entity_id = existing[0]
-                    self.resolver.register(
-                        entity_id, self.resolver.canonical[entity_id], aliases=[name]
-                    )
-                    continue
-                self.resolver.register(slug(name, NodeType.ENTITY.value), name)
+        self.register_entities(docs)
 
         claim_spans: List[Tuple[Document, int, int, str, str]] = []
 
@@ -249,10 +280,16 @@ class Pipeline:
 
             # 02 EXTRACT — a span becomes a claim only if it asserts something.
             for start, end, sentence in spans:
-                if not _ASSERTIVE.search(sentence) or len(sentence.split()) < 4:
+                if not is_claim(sentence):
                     extract.dropped += 1
                     continue
-                claim_id = slug(sentence, NodeType.CLAIM.value)
+                if doc.claim_id_of is not None:
+                    claim_id = doc.claim_id_of(sentence)
+                    if claim_id is None:
+                        extract.notes.append(f"kept live claim: {sentence[:60]}")
+                        continue
+                else:
+                    claim_id = claim_id_for(sentence, doc.claim_scope)
                 claim_spans.append((doc, start, end, sentence, claim_id))
                 extract.admitted += 1
 
@@ -363,9 +400,15 @@ class Pipeline:
 
         link.notes.append(f"untyped edges: {graph.untyped_edges}")
 
-        # 05 EMBED — vector on the node.
+        # 05 EMBED — vector on the node. Only nodes this build created: a build
+        # added onto an existing graph must not embed what earlier builds
+        # deliberately left without a vector (assumptions, evidence).
         for node in graph.nodes.values():
-            if node.embedding is None:
+            if (
+                node.embedding is None
+                and node.build == graph.build
+                and node.type is not NodeType.ASSUMPTION
+            ):
                 node.embedding = embed(f"{node.label} {node.attrs.get('rationale', '')}")
                 embed_stage.admitted += 1
 

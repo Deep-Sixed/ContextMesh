@@ -1297,6 +1297,28 @@ def add_source_arguments(parser: Any) -> Any:
         help=f"load a session directory written by --save ({SESSION_SCHEMA} v{SESSION_VERSION})",
     )
     parser.add_argument(
+        "--refresh",
+        metavar="DIR",
+        help=(
+            "with --session: re-read DIR, apply only what changed since the "
+            "session was built, save it as the next generation, print a report "
+            "and exit"
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --refresh: report what would change and fall, save nothing",
+    )
+    parser.add_argument(
+        "--as-of",
+        metavar="DATE",
+        help=(
+            "with --refresh: ISO date to record deleted files' evidence under "
+            "(the folder cannot date a deletion; without it, it is undated)"
+        ),
+    )
+    parser.add_argument(
         "--max-total-mb",
         type=float,
         default=None,
@@ -1328,6 +1350,54 @@ def add_source_arguments(parser: Any) -> Any:
         ),
     )
     return parser
+
+
+def run_refresh(args: Any, *, registry: Optional[TaskRegistry] = None) -> Dict[str, Any]:
+    """``--session DIR --refresh FOLDER``: refresh, save the next generation.
+
+    Nothing is written when nothing changed, on ``--dry-run``, or if the
+    refresh raises: the generation on disk keeps serving.
+    """
+    from contextmesh.refresh import RefreshError, refresh_folder
+
+    if args.session is None:
+        raise SessionError("--refresh updates a saved session; give it with --session DIR")
+    if args.save is not None:
+        raise SessionError("--refresh saves into --session itself; drop --save")
+    mb = getattr(args, "max_total_mb", None)
+    if mb is not None and not mb > 0:
+        raise SessionError("--max-total-mb must be more than 0")
+    opened = Session.load(args.session, registry=registry)
+    try:
+        report = refresh_folder(
+            opened.graph,
+            opened.resolver,
+            opened.ledger,
+            args.refresh,
+            dry_run=args.dry_run,
+            as_of=args.as_of,
+            max_total_bytes=(
+                DEFAULT_MAX_TOTAL_BYTES if mb is None else int(mb * 1_000_000)
+            ),
+        )
+    except (RefreshError, IngestError) as exc:
+        raise SessionError(str(exc)) from exc
+    except ValueError as exc:  # a bad --as-of
+        raise SessionError(f"--as-of: {exc}") from exc
+    result = report.to_dict()
+    result["saved"] = None
+    if report.changed and not args.dry_run:
+        target = opened.save(args.session)
+        result["saved"] = str(target)
+        result["generation"] = opened.generation
+    return result
+
+
+def _refresh_only_flags(args: Any) -> None:
+    if getattr(args, "refresh", None) is None and (
+        getattr(args, "dry_run", False) or getattr(args, "as_of", None) is not None
+    ):
+        raise SessionError("--dry-run and --as-of only apply to --refresh")
 
 
 def open_session(
@@ -1383,6 +1453,10 @@ def main(
     )
     args = parser.parse_args(argv)
     try:
+        _refresh_only_flags(args)
+        if args.refresh is not None:
+            print(json.dumps(run_refresh(args, registry=registry), indent=2, sort_keys=True))
+            return 0
         opened = open_session(args, registry=registry)
         if args.save is not None:
             target = opened.save(args.save)
