@@ -20,7 +20,7 @@ two things: **was the answer right**, and **what did it cost**.
 
 ## Method
 
-**Corpus.** This repository's own Markdown: 12 files, 804 claims. It is real
+**Corpus.** This repository's own Markdown: 12 files, 805 claims. It is real
 documentation written to explain the project, not text written for the test.
 `docs/BENCHMARKS.md` itself is excluded, because it quotes the questions.
 Every result records a fingerprint of the exact files it ran on.
@@ -53,23 +53,23 @@ with a fresh walker per question and with the questions reversed.
 
 ## Results
 
-Corpus `e7ca20d037881e85`: 12 files, 804 claims, 27,083 tokens. 32 answerable
+Corpus `92c57aeb78f8236b`: 12 files, 805 claims, 27,147 tokens. 32 answerable
 questions, 29 covered, 8 out of scope.
 
 | Method | Correct | Of covered | Mean tokens / question | Out-of-scope refused |
 |---|---|---|---|---|
-| Graph walk | 17/32 (53%) | 17/29 (59%) | 62 | 5/8 |
+| Graph walk | 17/32 (53%) | 17/29 (59%) | 60 | 5/8 |
 | BM25 top-1 | 17/32 (53%) | 17/29 (59%) | 26 | 3/8 |
 | BM25 top-3 | 22/32 (69%) | 22/29 (76%) | 91 | 3/8 |
-| BM25 top-5 | 22/32 (69%) | 22/29 (76%) | 152 | 3/8 |
-| Read everything | 29/32 (91%) | 29/29 (100%) | 27,083 | 0/8 |
+| BM25 top-5 | 22/32 (69%) | 22/29 (76%) | 151 | 3/8 |
+| Read everything | 29/32 (91%) | 29/29 (100%) | 27,147 | 0/8 |
 
 The README's "flat" figure averaged about 7,840 tokens on the same questions.
 
 ## What it says
 
 - **Against a real retriever, the token advantage is gone.** The walk spends
-  about 62 tokens per question; BM25 top-1 spends 26 for the same number of
+  about 60 tokens per question; BM25 top-1 spends 26 for the same number of
   correct answers. BM25 top-3 gets 5 more questions right for 91 tokens.
   "Roughly 120× fewer tokens" was a comparison with padding, not with search.
 - **Accuracy is the same as one keyword search.** The walk and BM25 top-1
@@ -81,7 +81,7 @@ The README's "flat" figure averaged about 7,840 tokens on the same questions.
   have refused, and it never refused an in-scope question, even the 12 covered
   ones it got wrong. A wrong answer comes back looking like a right one, with
   a path.
-- **Reading everything is the only way to reach the ceiling,** at about 430
+- **Reading everything is the only way to reach the ceiling,** at about 450
   times the walk's cost.
 - **The extractor loses answers before retrieval starts.** 3 of 32 questions
   have no correct claim at all:
