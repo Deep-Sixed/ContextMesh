@@ -99,34 +99,45 @@ It scores only whether the right sentence comes back, and at what token cost.
 
 `python -m contextmesh bench --suite bench/contextmesh-code.json` asks 18
 questions answered by the docstrings and comments of `contextmesh/`, plus 6
-out-of-scope ones. Corpus `7100f913821685b5`: 25 files, 977 claims.
+out-of-scope ones. Corpus `843be1ee936a360c`: 25 files, 980 claims.
 
 | Method | Correct | Mean tokens / question | Out-of-scope refused |
 |---|---|---|---|
-| Graph walk | 15/18 (83%) | 68 | 6/6 |
-| BM25 top-1 | 12/18 (67%) | 31 | 3/6 |
-| BM25 top-3 | 15/18 (83%) | 96 | 3/6 |
-| BM25 top-5 | 15/18 (83%) | 158 | 3/6 |
-| Read everything | 18/18 (100%) | 32,973 | 0/6 |
+| Graph walk | 13/18 (72%) | 77 | 6/6 |
+| BM25 top-1 | 12/18 (67%) | 31 | 2/6 |
+| BM25 top-3 | 15/18 (83%) | 96 | 2/6 |
+| BM25 top-5 | 15/18 (83%) | 158 | 2/6 |
+| Read everything | 18/18 (100%) | 33,134 | 0/6 |
 
-Here the walk beats one keyword result, matches three at about 70% of the
-cost, and refuses every out-of-scope question.
+The walk beats one keyword result by one question, trails three, and refuses
+every out-of-scope question. BM25 refuses two.
 
-Read it with a heavier caveat than the docs suite. These questions were
-written by sampling the extracted claims, so every answer is in a claim by
-construction (18/18 coverage). They lean toward sentences the extractor keeps,
-and toward the distinctive vocabulary of docstrings, which suits both methods.
-The docs suite, written from the documents rather than from the claims, is the
-fairer of the two.
+**An earlier run showed the walk at 15/18, and the difference is worth
+keeping on record.** That run treated every function name and every import as
+a marked-up name, so generic words became entities: `field` (from
+`dataclasses.field`), `read`, `json`, `graph`. Two answers were right only
+through those hubs. "Is a stored ledger digest regenerated on load?" was
+reached through `field`, because the answer says "not a *field* to be
+regenerated". Code names are now marked only when they are distinctive as
+written (dotted, snake_case, capitalised, or imported from the project), so
+those false links and those two lucky answers are gone.
+
+Read this suite with two caveats beyond the docs suite's:
+
+- **Its questions were written by sampling the extracted claims.** Every
+  answer is in a claim by construction (18/18 coverage), and the questions
+  lean toward the sentences and vocabulary the extractor keeps. The docs
+  suite, written from the documents, is the fairer of the two.
+- **Its corpus is this project's own source, so it moves with the code.**
+  Adding a docstring that says "with a capital" was enough to make BM25 stop
+  refusing "What is the capital of Australia?". Compare methods within one
+  run, where they all see the same corpus, rather than across runs. Numbers
+  are always reported with the fingerprint they ran on.
 
 Suites name the file types they cover (`corpus.suffixes`), so the docs suite
 still reads only Markdown and text now that `.py` files are read by default.
 Code ingestion did not change its results. Its fingerprint moves only when the
 repo's Markdown does.
-
-The code suite's corpus is this project's own source, so its fingerprint moves
-with almost every code change. Numbers are always reported with the
-fingerprint they ran on.
 
 ## Limits
 

@@ -298,11 +298,45 @@ class PythonParsingTest(unittest.TestCase):
         self.assertIn("Reads never block a writer.", texts)
         self.assertIn("How many times a failed write is retried before it gives up.", texts)
 
-    def test_definitions_imports_and_module_are_marked_names(self):
-        for name in ("store.shards", "ShardStore", "ShardStore.put", "put", "hashlib", "Path"):
+    def test_distinctive_definitions_and_the_module_are_marked_names(self):
+        for name in ("store.shards", "ShardStore", "ShardStore.put"):
             self.assertIn(name, self.parsed.marked)
-        self.assertNotIn("_private", self.parsed.marked)
+        # A plain lowercase word ("put") or a standard-library import
+        # ("hashlib", "Path") would become a hub entity matching every prose
+        # use of the word; private names are not documented surface.
+        for name in ("put", "hashlib", "Path", "_private"):
+            self.assertNotIn(name, self.parsed.marked)
         self.assertEqual(self.parsed.title, "Shard storage for the Index Builder.")
+
+    def test_only_project_imports_are_marked(self):
+        parsed = parse_python(
+            "a.py", "from .graph import ContextGraph, build\nfrom json import JSONDecoder\n"
+        )
+        self.assertIn("ContextGraph", parsed.marked)
+        self.assertNotIn("build", parsed.marked)
+        self.assertNotIn("JSONDecoder", parsed.marked)
+
+    def test_prose_after_a_literal_block_at_the_same_indent_is_kept(self):
+        source = '''class A:
+    def f(self):
+        """Run the job.
+
+        Use it like this::
+
+            run(job)
+
+        The job retries three times before it gives up.
+
+        Note::
+
+        This paragraph is not indented under the colons.
+        """
+'''
+        parsed = parse_python("a.py", source)
+        texts = [" ".join(parsed.clean[b.start:b.end].split()) for b in parsed.blocks]
+        self.assertIn("The job retries three times before it gives up.", texts)
+        self.assertIn("This paragraph is not indented under the colons.", texts)
+        self.assertNotIn("run(job)", texts)
 
     def test_spans_point_at_the_file(self):
         raw = self.parsed.raw
@@ -383,6 +417,15 @@ class CodeFolderTest(unittest.TestCase):
     def test_a_definition_named_in_prose_becomes_an_entity(self):
         built = build_folder(self.root)
         self.assertIsNotNone(built.resolver.match("ShardStore"))
+
+    def test_generic_code_names_do_not_become_hub_entities(self):
+        _write(self.root, "notes.md", "# Notes\n\nYou put the file in the store.\n"
+                                      "Then put it back and read the hashlib docs.\n")
+        built = build_folder(self.root)
+        labels = {n.label.lower() for n in built.graph.nodes.values()
+                  if n.type is NodeType.ENTITY}
+        for generic in ("put", "hashlib", "path"):
+            self.assertNotIn(generic, labels)
 
     def test_code_can_be_left_out(self):
         built = build_folder(self.root, suffixes=PROSE_SUFFIXES)

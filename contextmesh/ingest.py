@@ -555,6 +555,17 @@ def _looks_like_code(text: str) -> bool:
     return True
 
 
+def _distinctive(name: str) -> bool:
+    """Whether a code name is distinctive as written: dotted, snake_case or
+    with a capital ("contextmesh.ingest", "build_folder", "ShardStore").
+
+    A plain lowercase word ("read", "build", "graph") is not: as an entity it
+    would match every prose use of the word and become a hub joining text
+    that has nothing to do with the function.
+    """
+    return "." in name or "_" in name.strip("_") or any(ch.isupper() for ch in name)
+
+
 def _definitions(tree: ast.AST) -> List[Tuple[str, ast.AST]]:
     """(qualified name, node) for the module and every class and function."""
     out: List[Tuple[str, ast.AST]] = [("", tree)]
@@ -624,12 +635,17 @@ def parse_python(rel: str, raw: str, mtime: float = 0.0) -> ParsedFile:
         doctest, the indented block after a ``::``, an example that parses as
         Python — is left blanked: it is not something the author asserts.
         """
-        after_literal = False
+        literal_under: Optional[int] = None  # indent of the paragraph ending "::"
         for m in re.finditer(r"\S(?:.*\S)?(?:\n(?![ \t]*\n)[ \t]*\S.*)*", raw[start:end]):
             text = m.group(0).rstrip()
             first = start + m.start()
             indent = first - (raw.rfind("\n", 0, first) + 1)
-            literal, after_literal = after_literal and indent > 0, text.endswith("::")
+            # A literal block is what follows "::" indented *more* than the
+            # paragraph that introduced it; it ends at the first paragraph
+            # back at that indent or less.
+            literal = literal_under is not None and indent > literal_under
+            if not literal:
+                literal_under = indent if text.endswith("::") else None
             dedented = "\n".join(line.strip() for line in text.split("\n"))
             if (
                 literal
@@ -656,11 +672,15 @@ def parse_python(rel: str, raw: str, mtime: float = 0.0) -> ParsedFile:
     module = rel[:-3].replace("/", ".") if rel.endswith(".py") else rel
     if module.endswith(".__init__"):
         module = module[: -len(".__init__")]
-    marked.append(module)
+    if _distinctive(module):
+        marked.append(module)
     for symbol, node in definitions:
-        if symbol and not symbol.split(".")[-1].startswith("_"):
-            marked.append(symbol)
-            marked.append(symbol.split(".")[-1])
+        name = symbol.split(".")[-1]
+        if symbol and not name.startswith("_"):
+            if "." in symbol:
+                marked.append(symbol)
+            if _distinctive(name):
+                marked.append(name)
         body = getattr(node, "body", None)
         if not body or not isinstance(body[0], ast.Expr):
             continue
@@ -683,12 +703,16 @@ def parse_python(rel: str, raw: str, mtime: float = 0.0) -> ParsedFile:
         if not symbol and not title:
             title = raw[inner_start:inner_end].strip().split("\n", 1)[0].strip()[:80]
 
-    # Imports name things this file uses.
+    # Names imported from the project itself (relative imports). Absolute
+    # imports are left out: "json", "field" or "Path" would become entities
+    # wherever prose says the word, and telling the standard library from
+    # third-party packages needs a list that differs between Python versions.
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            marked.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            marked.extend(alias.name for alias in node.names if alias.name != "*")
+        if isinstance(node, ast.ImportFrom) and node.level:
+            marked.extend(
+                alias.name for alias in node.names
+                if alias.name != "*" and _distinctive(alias.name)
+            )
 
     # line -> innermost definition containing it. Outer definitions are laid
     # down first and inner ones over them, so one pass serves every comment

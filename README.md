@@ -163,9 +163,13 @@ definition it documents or sits in (`symbol: "Pipeline.build"`). Docstring
 sentences are graded like paragraphs; comments are graded no higher than
 `medium`, because comments drift from the code they describe. Code itself is
 never a claim: examples, doctests, `::` blocks, commented-out code, pragmas
-(`# noqa`, `# type:`…) and shebangs are left out. Definitions, imports and the
-module's dotted path count as marked-up names, so `ShardStore` becomes an
-entity wherever prose mentions it. A file that is not valid Python is skipped
+(`# noqa`, `# type:`…) and shebangs are left out. Names that are distinctive as
+written count as marked-up names: qualified names (`Walker.ask`), snake_case
+or capitalised definitions (`build_folder`, `ShardStore`), the module's dotted
+path, and names imported from the project itself. So `ShardStore` becomes an
+entity wherever prose mentions it. Plain lowercase words (`read`, `build`) and
+standard-library imports (`json`, `Path`) don't, because as entities they would
+match every prose use of the word. A file that is not valid Python is skipped
 with the line it failed on. The parser is the standard library's `ast` and
 `tokenize`, so there are still no dependencies.
 
